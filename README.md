@@ -10,7 +10,7 @@ Cherrikka 用于在 `Cherry Studio` 与 `RikkaHub` 备份 ZIP 间互转。
 
 ## 在线试用
 
-可直接访问（点击跳转）：[upw.de5.net](https://upw.de5.net)
+可直接访问（点击跳转）：[uwp.de5.net](https://uwp.de5.net)
 
 ## CLI 用法
 

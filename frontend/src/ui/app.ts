@@ -83,6 +83,12 @@ export function mountApp(container: HTMLElement): void {
     const progress = createProgressPanel(text);
     const result = createResultPanel(text);
 
+    upload.root.classList.add('panel-source');
+    format.root.classList.add('panel-direction');
+    actions.root.classList.add('panel-options');
+    progress.root.classList.add('panel-progress');
+    result.root.classList.add('panel-result');
+
     updateSelectedMeta(upload.fileMeta, state, text);
 
     format.sourceSelect.value = state.sourceFormat;
