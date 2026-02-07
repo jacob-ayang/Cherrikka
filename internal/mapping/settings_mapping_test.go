@@ -101,6 +101,48 @@ func TestBuildRikkaSettingsFromIR(t *testing.T) {
 	}
 }
 
+func TestBuildRikkaSettingsFromIR_AssistantMissingModelFallsBack(t *testing.T) {
+	cfg := map[string]any{
+		"cherry.persistSlices": map[string]any{
+			"assistants": map[string]any{
+				"assistants": []any{
+					map[string]any{"id": "a1", "name": "A1", "prompt": "p"},
+				},
+			},
+			"llm": map[string]any{
+				"defaultModel": map[string]any{"id": "m1"},
+				"providers": []any{
+					map[string]any{"id": "p1", "type": "openai", "models": []any{map[string]any{"id": "m1"}}},
+				},
+			},
+		},
+	}
+
+	norm, _ := NormalizeFromCherryConfig(cfg)
+	in := &ir.BackupIR{
+		SourceFormat: "cherry",
+		Settings:     norm,
+		Config:       cfg,
+	}
+
+	settings, _ := BuildRikkaSettingsFromIR(in, nil)
+	assistants := asSlice(settings["assistants"])
+	if len(assistants) == 0 {
+		t.Fatalf("expected mapped assistant")
+	}
+	firstAssistant := asMap(assistants[0])
+	assistantModelID := str(firstAssistant["chatModelId"])
+	if assistantModelID == "" {
+		t.Fatalf("expected assistant chatModelId fallback")
+	}
+	if !isValidUUID(assistantModelID) {
+		t.Fatalf("expected assistant chatModelId to be uuid, got=%s", assistantModelID)
+	}
+	if assistantModelID != str(settings["chatModelId"]) {
+		t.Fatalf("assistant chatModelId should match selected chatModelId")
+	}
+}
+
 func TestBuildCherryPersistSlicesFromIR(t *testing.T) {
 	cfg := map[string]any{
 		"rikka.settings": map[string]any{

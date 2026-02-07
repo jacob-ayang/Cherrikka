@@ -213,6 +213,8 @@ func buildRikkaAssistants(in *ir.BackupIR, coreAssistants []any, modelAlias map[
 				delete(raw, "chatModelId")
 				*warnings = appendUnique(*warnings, "assistant chat model not found, dropped: "+chatModel)
 			}
+		} else {
+			delete(raw, "chatModelId")
 		}
 		if _, ok := raw["streamOutput"]; !ok {
 			raw["streamOutput"] = true
@@ -341,6 +343,8 @@ func enforceRikkaConsistency(settings map[string]any) []string {
 					delete(am, "chatModelId")
 				}
 			}
+		} else if firstModelID != "" {
+			am["chatModelId"] = firstModelID
 		}
 		assistants[i] = am
 		assistantIDs[id] = struct{}{}

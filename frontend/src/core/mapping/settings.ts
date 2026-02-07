@@ -559,6 +559,8 @@ function buildRikkaAssistants(
         delete assistant.chatModelId;
         warnings.push(`assistant chat model not found, dropped: ${chatModelRaw}`);
       }
+    } else {
+      delete assistant.chatModelId;
     }
     if (!Object.prototype.hasOwnProperty.call(assistant, 'streamOutput')) assistant.streamOutput = true;
     if (!Object.prototype.hasOwnProperty.call(assistant, 'contextMessageSize')) assistant.contextMessageSize = 64;
@@ -669,6 +671,8 @@ function enforceRikkaConsistency(settings: Record<string, unknown>): string[] {
       } else {
         delete out.chatModelId;
       }
+    } else if (!chatModelId && firstModelId) {
+      out.chatModelId = firstModelId;
     }
     assistantIds.add(asString(out.id));
     return out;
