@@ -80,6 +80,22 @@ func NormalizeFromCherryConfig(config map[string]any) (map[string]any, []string)
 			coreModels[key] = cloneMap(m)
 		}
 	}
+	setModelSelection := func(selectionKey, sourceKey string) {
+		if _, exists := coreModels[selectionKey]; exists {
+			return
+		}
+		src := asMap(coreModels[sourceKey])
+		if len(src) == 0 {
+			return
+		}
+		if id := pickFirstString(src["id"], src["modelId"], src["name"]); id != "" {
+			coreModels[selectionKey] = id
+		}
+	}
+	setModelSelection("chatModelId", "defaultModel")
+	setModelSelection("suggestionModelId", "quickModel")
+	setModelSelection("translateModeId", "translateModel")
+	setModelSelection("titleModelId", "topicNamingModel")
 	out["core.models"] = coreModels
 
 	selection := map[string]any{}

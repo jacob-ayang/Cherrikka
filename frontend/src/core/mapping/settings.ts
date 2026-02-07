@@ -1,4 +1,5 @@
 import type { BackupIR } from '../ir/types';
+import { validate as uuidValidate, v5 as uuidv5 } from 'uuid';
 import {
   asArray,
   asMap,
@@ -12,6 +13,7 @@ import {
 import { newId } from '../util/id';
 
 export const DEFAULT_ASSISTANT_ID = '0950e2dc-9bd5-4801-afa3-aa887aa36b4e';
+const UUID_NAMESPACE_OID = '6ba7b812-9dad-11d1-80b4-00c04fd430c8';
 
 export function defaultNormalizedSettings(): Record<string, unknown> {
   return {
@@ -129,6 +131,23 @@ export function normalizeFromCherryConfig(config: Record<string, unknown>): [Rec
       models[key] = cloneAny(value);
     }
   }
+  const setModelSelection = (selectionKey: string, sourceKey: string): void => {
+    if (Object.prototype.hasOwnProperty.call(models, selectionKey)) {
+      return;
+    }
+    const sourceModel = asMap(models[sourceKey]);
+    if (Object.keys(sourceModel).length === 0) {
+      return;
+    }
+    const id = pickFirstString(sourceModel.id, sourceModel.modelId, sourceModel.name);
+    if (id) {
+      models[selectionKey] = id;
+    }
+  };
+  setModelSelection('chatModelId', 'defaultModel');
+  setModelSelection('suggestionModelId', 'quickModel');
+  setModelSelection('translateModeId', 'translateModel');
+  setModelSelection('titleModelId', 'topicNamingModel');
   out['core.models'] = models;
 
   const selection: Record<string, unknown> = {};
@@ -301,14 +320,15 @@ export function buildRikkaSettingsFromIR(
 
   const normalized = Object.keys(ir.settings).length > 0 ? ir.settings : normalizeFromSource(ir)[0];
 
-  const providers = buildRikkaProviders(asArray(normalized['core.providers']), warnings);
+  const modelAlias = new Map<string, string>();
+  const providers = buildRikkaProviders(asArray(normalized['core.providers']), warnings, modelAlias);
   if (providers.length > 0) {
     settings.providers = providers;
   } else if (!Array.isArray(settings.providers)) {
     settings.providers = [];
   }
 
-  const assistants = buildRikkaAssistants(ir, asArray(normalized['core.assistants']));
+  const assistants = buildRikkaAssistants(ir, asArray(normalized['core.assistants']), modelAlias, warnings);
   if (assistants.length > 0) {
     settings.assistants = assistants;
   } else if (!Array.isArray(settings.assistants)) {
@@ -316,15 +336,11 @@ export function buildRikkaSettingsFromIR(
   }
 
   const models = asMap(normalized['core.models']);
-  for (const key of ['chatModelId', 'titleModelId', 'translateModeId', 'suggestionModelId', 'imageGenerationModelId']) {
-    if (Object.prototype.hasOwnProperty.call(models, key)) {
-      settings[key] = cloneAny(models[key]);
-    }
-  }
+  applyRikkaModelSelections(settings, models, modelAlias);
 
   const selection = asMap(normalized['core.selection']);
   if (asString(selection.assistantId)) {
-    settings.assistantId = selection.assistantId;
+    settings.assistantId = ensureUuid(asString(selection.assistantId), `assistant:selection:${asString(selection.assistantId)}`);
   }
 
   const webdavRaw = asMap(normalized['sync.webdav']);
@@ -477,7 +493,11 @@ export function buildCherryPersistSlicesFromIR(
   return [slices, dedupeStrings(warnings)];
 }
 
-function buildRikkaProviders(coreProviders: unknown[], warnings: string[]): Record<string, unknown>[] {
+function buildRikkaProviders(
+  coreProviders: unknown[],
+  warnings: string[],
+  modelAlias: Map<string, string>,
+): Record<string, unknown>[] {
   const result: Record<string, unknown>[] = [];
   for (const value of coreProviders) {
     const provider = asMap(value);
@@ -488,12 +508,29 @@ function buildRikkaProviders(coreProviders: unknown[], warnings: string[]): Reco
       continue;
     }
     const raw = cloneAny(asMap(provider.raw)) as Record<string, unknown>;
-    if (!asString(raw.id)) raw.id = pickFirstString(provider.id, newId());
+    const providerSeed = pickFirstString(raw.id, provider.id, raw.name, provider.name, mappedType, newId());
+    raw.id = ensureUuid(pickFirstString(raw.id, provider.id), `provider:${providerSeed}`);
     if (!asString(raw.name)) raw.name = pickFirstString(provider.name, mappedType.toUpperCase());
     raw.type = rikkaType;
-    if (!Array.isArray(raw.models)) {
-      raw.models = [];
+    const normalizedModels: Record<string, unknown>[] = [];
+    for (const modelValue of asArray(raw.models)) {
+      const model = cloneAny(asMap(modelValue)) as Record<string, unknown>;
+      if (Object.keys(model).length === 0) {
+        continue;
+      }
+      const modelRef = pickFirstString(model.modelId, model.id, model.name, model.displayName, newId());
+      const modelId = ensureUuid(asString(model.id), `model:${raw.id as string}:${modelRef}`);
+      model.id = modelId;
+      if (!asString(model.modelId)) model.modelId = modelRef;
+      if (!asString(model.displayName)) model.displayName = pickFirstString(model.name, model.modelId, modelId);
+      if (!asString(model.type)) model.type = 'CHAT';
+      registerModelAlias(modelAlias, modelRef, modelId);
+      registerModelAlias(modelAlias, asString(model.id), modelId);
+      registerModelAlias(modelAlias, asString(model.displayName), modelId);
+      registerModelAlias(modelAlias, asString(model.name), modelId);
+      normalizedModels.push(model);
     }
+    raw.models = normalizedModels;
     if (!asString(raw.baseUrl) && asString(raw.apiHost)) {
       raw.baseUrl = raw.apiHost;
     }
@@ -502,11 +539,27 @@ function buildRikkaProviders(coreProviders: unknown[], warnings: string[]): Reco
   return result;
 }
 
-function buildRikkaAssistants(ir: BackupIR, coreAssistants: unknown[]): Record<string, unknown>[] {
+function buildRikkaAssistants(
+  ir: BackupIR,
+  coreAssistants: unknown[],
+  modelAlias: Map<string, string>,
+  warnings: string[],
+): Record<string, unknown>[] {
   const result: Record<string, unknown>[] = [];
   const pushAssistant = (assistant: Record<string, unknown>): void => {
-    if (!asString(assistant.id)) assistant.id = newId();
+    const assistantSeed = pickFirstString(assistant.id, assistant.name, newId());
+    assistant.id = ensureUuid(asString(assistant.id), `assistant:${assistantSeed}`);
     if (!asString(assistant.name)) assistant.name = 'Imported Assistant';
+    const chatModelRaw = pickFirstString(assistant.chatModelId);
+    if (chatModelRaw) {
+      const resolved = resolveModelId(chatModelRaw, modelAlias);
+      if (resolved) {
+        assistant.chatModelId = resolved;
+      } else {
+        delete assistant.chatModelId;
+        warnings.push(`assistant chat model not found, dropped: ${chatModelRaw}`);
+      }
+    }
     if (!Object.prototype.hasOwnProperty.call(assistant, 'streamOutput')) assistant.streamOutput = true;
     if (!Object.prototype.hasOwnProperty.call(assistant, 'contextMessageSize')) assistant.contextMessageSize = 64;
     result.push(assistant);
@@ -577,12 +630,45 @@ function buildCherryProviders(coreProviders: unknown[], warnings: string[]): Rec
 
 function enforceRikkaConsistency(settings: Record<string, unknown>): string[] {
   const warnings: string[] = [];
+  const providers = asArray(settings.providers).map((value) => asMap(value));
+  const modelIds = new Set<string>();
+  let firstModelId = '';
+  const normalizedProviders = providers.map((provider) => {
+    const out = cloneAny(provider) as Record<string, unknown>;
+    const providerSeed = pickFirstString(out.id, out.name, newId());
+    out.id = ensureUuid(asString(out.id), `provider:consistency:${providerSeed}`);
+    const normalizedModels = asArray(out.models).map((modelValue) => {
+      const model = cloneAny(asMap(modelValue)) as Record<string, unknown>;
+      const modelRef = pickFirstString(model.modelId, model.id, model.name, model.displayName, newId());
+      model.id = ensureUuid(asString(model.id), `model:consistency:${asString(out.id)}:${modelRef}`);
+      if (!asString(model.modelId)) model.modelId = modelRef;
+      if (!asString(model.displayName)) model.displayName = pickFirstString(model.name, model.modelId, model.id);
+      if (!asString(model.type)) model.type = 'CHAT';
+      const modelId = asString(model.id);
+      if (modelId) {
+        modelIds.add(modelId);
+        if (!firstModelId) firstModelId = modelId;
+      }
+      return model;
+    });
+    out.models = normalizedModels;
+    return out;
+  });
+  settings.providers = normalizedProviders;
+
   const assistants = asArray(settings.assistants).map((value) => asMap(value));
   const assistantIds = new Set<string>();
   const normalizedAssistants = assistants.map((assistant) => {
     const out = cloneAny(assistant) as Record<string, unknown>;
-    if (!asString(out.id)) {
-      out.id = newId();
+    const assistantSeed = pickFirstString(out.id, out.name, newId());
+    out.id = ensureUuid(asString(out.id), `assistant:consistency:${assistantSeed}`);
+    const chatModelId = asString(out.chatModelId);
+    if (chatModelId && !modelIds.has(chatModelId)) {
+      if (firstModelId) {
+        out.chatModelId = firstModelId;
+      } else {
+        delete out.chatModelId;
+      }
     }
     assistantIds.add(asString(out.id));
     return out;
@@ -590,35 +676,97 @@ function enforceRikkaConsistency(settings: Record<string, unknown>): string[] {
   settings.assistants = normalizedAssistants;
 
   if (assistantIds.size > 0) {
-    const selected = asString(settings.assistantId);
+    const selected = ensureUuid(asString(settings.assistantId), `assistant:selected:${asString(settings.assistantId)}`);
     if (!assistantIds.has(selected)) {
       settings.assistantId = normalizedAssistants[0].id;
       warnings.push('selected assistant not found, fallback to first assistant');
+    } else {
+      settings.assistantId = selected;
     }
   } else if (!asString(settings.assistantId)) {
     settings.assistantId = DEFAULT_ASSISTANT_ID;
   }
 
-  const modelIds = new Set<string>();
-  for (const providerValue of asArray(settings.providers)) {
-    const provider = asMap(providerValue);
-    for (const modelValue of asArray(provider.models)) {
-      const model = asMap(modelValue);
-      const modelId = asString(model.id);
-      if (modelId) {
-        modelIds.add(modelId);
-      }
-    }
-  }
-
-  for (const key of ['chatModelId', 'titleModelId', 'translateModeId', 'suggestionModelId']) {
+  for (const key of ['chatModelId', 'titleModelId', 'translateModeId', 'suggestionModelId', 'imageGenerationModelId']) {
     const selectedId = asString(settings[key]);
     if (selectedId && !modelIds.has(selectedId)) {
+      if (firstModelId) {
+        settings[key] = firstModelId;
+      }
       warnings.push(`selected model ${key} not found in providers`);
+    } else if (!selectedId && firstModelId) {
+      settings[key] = firstModelId;
     }
   }
 
   return warnings;
+}
+
+function applyRikkaModelSelections(
+  settings: Record<string, unknown>,
+  models: Record<string, unknown>,
+  modelAlias: Map<string, string>,
+): void {
+  const setSelection = (settingKey: string, ...candidates: unknown[]): void => {
+    for (const candidate of candidates) {
+      const resolved = resolveModelId(candidate, modelAlias);
+      if (resolved) {
+        settings[settingKey] = resolved;
+        return;
+      }
+    }
+  };
+
+  setSelection('chatModelId', models.chatModelId, models.defaultModel);
+  setSelection('titleModelId', models.titleModelId, models.topicNamingModel);
+  setSelection('translateModeId', models.translateModeId, models.translateModel);
+  setSelection('suggestionModelId', models.suggestionModelId, models.quickModel);
+  setSelection('imageGenerationModelId', models.imageGenerationModelId);
+}
+
+function resolveModelId(candidate: unknown, modelAlias: Map<string, string>): string {
+  const resolveByString = (value: string): string => {
+    const normalized = value.trim();
+    if (!normalized) return '';
+    if (uuidValidate(normalized)) return normalized;
+    const exact = modelAlias.get(normalized);
+    if (exact) return exact;
+    const lower = modelAlias.get(normalized.toLowerCase());
+    if (lower) return lower;
+    return '';
+  };
+
+  const fromString = resolveByString(asString(candidate));
+  if (fromString) return fromString;
+
+  const fromMap = asMap(candidate);
+  if (Object.keys(fromMap).length === 0) return '';
+  for (const key of ['id', 'modelId', 'name', 'displayName']) {
+    const maybe = resolveByString(pickFirstString(fromMap[key]));
+    if (maybe) return maybe;
+  }
+  return '';
+}
+
+function registerModelAlias(modelAlias: Map<string, string>, key: string, modelId: string): void {
+  const normalizedKey = key.trim();
+  if (!normalizedKey || !modelId.trim()) return;
+  if (!modelAlias.has(normalizedKey)) {
+    modelAlias.set(normalizedKey, modelId);
+  }
+  const lower = normalizedKey.toLowerCase();
+  if (!modelAlias.has(lower)) {
+    modelAlias.set(lower, modelId);
+  }
+}
+
+function ensureUuid(candidate: string, seed: string): string {
+  const normalized = candidate.trim();
+  if (normalized && uuidValidate(normalized)) {
+    return normalized;
+  }
+  const finalSeed = seed.trim() || newId();
+  return uuidv5(finalSeed, UUID_NAMESPACE_OID);
 }
 
 function cherryProviderToCanonical(sourceType: string): [string, boolean] {

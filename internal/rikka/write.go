@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	guuid "github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
 	"cherrikka/internal/ir"
@@ -58,7 +59,8 @@ func BuildFromIR(in *ir.BackupIR, outputDir, templateDir string, redactSecrets b
 		return nil, err
 	}
 	warnings = append(warnings, fileWarnings...)
-	convWarnings, err := writeConversations(db, in.Conversations, filePathByID, idMap)
+	resolveAssistantID := newAssistantResolver(settings)
+	convWarnings, err := writeConversations(db, in.Conversations, filePathByID, idMap, resolveAssistantID)
 	if err != nil {
 		return nil, err
 	}
@@ -180,14 +182,20 @@ func materializeFiles(db *sql.DB, outputDir string, files []ir.IRFile, pathByID 
 	return dedupeWarnings(warnings), nil
 }
 
-func writeConversations(db *sql.DB, convs []ir.IRConversation, filePathByID map[string]string, idMap map[string]string) ([]string, error) {
+func writeConversations(
+	db *sql.DB,
+	convs []ir.IRConversation,
+	filePathByID map[string]string,
+	idMap map[string]string,
+	resolveAssistantID func(string) string,
+) ([]string, error) {
 	warnings := []string{}
 	for _, conv := range convs {
-		convID := fallbackString(conv.ID, util.NewUUID())
+		convID := normalizeUUIDOrDeterministic(conv.ID, "conversation:"+conv.ID+":"+conv.Title)
 		idMap["topic:"+conv.ID] = convID
 		created := parseTimeMillis(conv.CreatedAt)
 		updated := parseTimeMillis(conv.UpdatedAt)
-		assistantID := fallbackString(conv.AssistantID, "0950e2dc-9bd5-4801-afa3-aa887aa36b4e")
+		assistantID := resolveAssistantID(conv.AssistantID)
 		if _, err := db.Exec(`INSERT INTO ConversationEntity (id, assistant_id, title, nodes, create_at, update_at, truncate_index, suggestions, is_pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			convID,
 			assistantID,
@@ -230,10 +238,7 @@ func writeConversations(db *sql.DB, convs []ir.IRConversation, filePathByID map[
 }
 
 func rikkaMessageFromIR(m ir.IRMessage, filePathByID map[string]string) map[string]any {
-	messageID := m.ID
-	if messageID == "" {
-		messageID = util.NewUUID()
-	}
+	messageID := normalizeUUIDOrDeterministic(m.ID, "message:"+m.ID+":"+m.Role)
 	parts := make([]any, 0, len(m.Parts))
 	for _, p := range m.Parts {
 		parts = append(parts, rikkaPartFromIR(p, filePathByID))
@@ -269,7 +274,7 @@ func rikkaPartFromIR(p ir.IRPart, filePathByID map[string]string) map[string]any
 		}
 		return map[string]any{
 			"type":       "me.rerere.ai.ui.UIMessagePart.Tool",
-			"toolCallId": fallbackString(p.ToolCallID, util.NewUUID()),
+			"toolCallId": normalizeUUIDOrDeterministic(p.ToolCallID, "tool-call:"+p.ToolCallID+":"+p.Name),
 			"toolName":   fallbackName(p.Name, "tool"),
 			"input":      fallbackString(strings.TrimSpace(p.Input), "{}"),
 			"output":     out,
@@ -366,6 +371,73 @@ func parseMillisOrNow(v string) int64 {
 		return t.UnixMilli()
 	}
 	return time.Now().UnixMilli()
+}
+
+func newAssistantResolver(settings map[string]any) func(string) string {
+	assistantIDs := map[string]struct{}{}
+	first := ""
+	for _, item := range asSlice(settings["assistants"]) {
+		am := asMap(item)
+		id := strings.TrimSpace(str(am["id"]))
+		if id == "" {
+			continue
+		}
+		if !isValidUUID(id) {
+			continue
+		}
+		if first == "" {
+			first = id
+		}
+		assistantIDs[id] = struct{}{}
+	}
+	selected := strings.TrimSpace(str(settings["assistantId"]))
+	if !isValidUUID(selected) {
+		selected = ""
+	}
+	if selected != "" {
+		if _, ok := assistantIDs[selected]; !ok {
+			selected = ""
+		}
+	}
+	fallback := selected
+	if fallback == "" {
+		fallback = first
+	}
+	if fallback == "" {
+		fallback = "0950e2dc-9bd5-4801-afa3-aa887aa36b4e"
+	}
+	return func(candidate string) string {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			if _, ok := assistantIDs[candidate]; ok {
+				return candidate
+			}
+			if isValidUUID(candidate) {
+				if _, ok := assistantIDs[candidate]; ok {
+					return candidate
+				}
+			}
+		}
+		return fallback
+	}
+}
+
+func normalizeUUIDOrDeterministic(candidate, seed string) string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate != "" {
+		if _, err := guuid.Parse(candidate); err == nil {
+			return candidate
+		}
+	}
+	if strings.TrimSpace(seed) == "" {
+		seed = util.NewUUID()
+	}
+	return guuid.NewSHA1(guuid.NameSpaceOID, []byte(seed)).String()
+}
+
+func isValidUUID(v string) bool {
+	_, err := guuid.Parse(strings.TrimSpace(v))
+	return err == nil
 }
 
 func dedupeWarnings(in []string) []string {

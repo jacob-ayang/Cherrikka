@@ -1,4 +1,5 @@
 import type { Database } from 'sql.js';
+import { validate as uuidValidate, v5 as uuidv5 } from 'uuid';
 import type { ArchiveEntries } from '../backup/archive';
 import {
   hasFile,
@@ -29,6 +30,7 @@ import {
 import { openDatabase } from '../../vendor/sql';
 
 const DEFAULT_IDENTITY_HASH = '6973cccf653b3a6e80900c4e065ed25e';
+const UUID_NAMESPACE_OID = '6ba7b812-9dad-11d1-80b4-00c04fd430c8';
 
 const SCHEMA_SQL = [
   "CREATE TABLE IF NOT EXISTS ConversationEntity (`id` TEXT NOT NULL, `assistant_id` TEXT NOT NULL DEFAULT '0950e2dc-9bd5-4801-afa3-aa887aa36b4e', `title` TEXT NOT NULL, `nodes` TEXT NOT NULL, `create_at` INTEGER NOT NULL, `update_at` INTEGER NOT NULL, `truncate_index` INTEGER NOT NULL DEFAULT -1, `suggestions` TEXT NOT NULL DEFAULT '[]', `is_pinned` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`id`))",
@@ -340,7 +342,8 @@ export async function buildRikkaArchiveFromIR(
     const fileWarnings = materializeFiles(db, outputEntries, ir.files, filePathById, idMap);
     warnings.push(...fileWarnings);
 
-    const conversationWarnings = writeConversations(db, ir.conversations, filePathById, idMap);
+    const resolveAssistantId = createAssistantResolver(mappedSettings);
+    const conversationWarnings = writeConversations(db, ir.conversations, filePathById, idMap, resolveAssistantId);
     warnings.push(...conversationWarnings);
 
     const dbBytes = db.export();
@@ -554,18 +557,19 @@ function writeConversations(
   conversations: IRConversation[],
   filePathById: Record<string, string>,
   idMap: Record<string, string>,
+  resolveAssistantId: (candidate: string) => string,
 ): string[] {
   const warnings: string[] = [];
 
   for (const conversation of conversations) {
-    const convId = pickFirstString(conversation.id, newId());
+    const convId = ensureUuid(asString(conversation.id), `conversation:${pickFirstString(conversation.id, conversation.title)}`);
     idMap[`topic:${conversation.id}`] = convId;
 
     db.run(
       'INSERT INTO ConversationEntity (id, assistant_id, title, nodes, create_at, update_at, truncate_index, suggestions, is_pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
         convId,
-        pickFirstString(conversation.assistantId, DEFAULT_ASSISTANT_ID),
+        resolveAssistantId(asString(conversation.assistantId)),
         pickFirstString(conversation.title, 'Imported Conversation'),
         '[]',
         parseTimeMillis(conversation.createdAt),
@@ -598,7 +602,7 @@ function writeConversations(
 }
 
 function rikkaMessageFromIR(message: IRMessage, filePathById: Record<string, string>): Record<string, unknown> {
-  const messageId = pickFirstString(message.id, newId());
+  const messageId = ensureUuid(asString(message.id), `message:${pickFirstString(message.id, message.role)}`);
   const parts = message.parts.map((part) => rikkaPartFromIR(part, filePathById));
   if (parts.length === 0) {
     parts.push({
@@ -624,7 +628,7 @@ function rikkaPartFromIR(part: IRPart, filePathById: Record<string, string>): Re
     case 'tool':
       return {
         type: 'me.rerere.ai.ui.UIMessagePart.Tool',
-        toolCallId: pickFirstString(part.toolCallId, newId()),
+        toolCallId: ensureUuid(asString(part.toolCallId), `tool-call:${pickFirstString(part.toolCallId, part.name)}`),
         toolName: pickFirstString(part.name, 'tool'),
         input: pickFirstString(part.input, '{}'),
         output: (part.output ?? []).map((item) => ({
@@ -768,6 +772,40 @@ function numberOrUndefined(value: unknown): number | undefined {
     }
   }
   return undefined;
+}
+
+function createAssistantResolver(settings: Record<string, unknown>): (candidate: string) => string {
+  const validAssistantIds = new Set<string>();
+  let first = '';
+  for (const assistantValue of asArray(settings.assistants)) {
+    const assistant = asMap(assistantValue);
+    const id = asString(assistant.id);
+    if (!id || !uuidValidate(id)) continue;
+    validAssistantIds.add(id);
+    if (!first) first = id;
+  }
+
+  let fallback = asString(settings.assistantId);
+  if (!fallback || !validAssistantIds.has(fallback)) {
+    fallback = first || DEFAULT_ASSISTANT_ID;
+  }
+
+  return (candidate: string): string => {
+    const normalized = candidate.trim();
+    if (normalized && validAssistantIds.has(normalized)) {
+      return normalized;
+    }
+    return fallback;
+  };
+}
+
+function ensureUuid(candidate: string, seed: string): string {
+  const normalized = candidate.trim();
+  if (normalized && uuidValidate(normalized)) {
+    return normalized;
+  }
+  const finalSeed = seed.trim() || newId();
+  return uuidv5(finalSeed, UUID_NAMESPACE_OID);
 }
 
 function fileNameFromUrl(url: string): string {
