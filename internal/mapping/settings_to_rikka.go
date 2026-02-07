@@ -265,7 +265,9 @@ func buildRikkaAssistants(in *ir.BackupIR, coreAssistants []any, modelAlias map[
 			assistant["streamOutput"] = stream
 		}
 		if maxTokens, ok := coerceInt(raw["maxTokens"]); ok {
-			assistant["maxTokens"] = maxTokens
+			if maxTokens > 0 {
+				assistant["maxTokens"] = maxTokens
+			}
 		}
 		if enableMemory, ok := coerceBool(raw["enableMemory"]); ok {
 			assistant["enableMemory"] = enableMemory
@@ -450,6 +452,9 @@ func enforceRikkaConsistency(settings map[string]any) []string {
 			}
 		} else if activeFirstModelID != "" {
 			am["chatModelId"] = activeFirstModelID
+		}
+		if maxTokens, ok := coerceInt(am["maxTokens"]); ok && maxTokens <= 0 {
+			delete(am, "maxTokens")
 		}
 		assistants[i] = am
 		assistantIDs[id] = struct{}{}

@@ -656,7 +656,7 @@ function buildRikkaAssistants(
       mapped.streamOutput = streamOutput;
     }
     const maxTokens = asInt(assistant.maxTokens);
-    if (maxTokens !== undefined) {
+    if (maxTokens !== undefined && maxTokens > 0) {
       mapped.maxTokens = maxTokens;
     }
     const enableMemory = asBool(assistant.enableMemory);
@@ -944,6 +944,10 @@ function enforceRikkaConsistency(settings: Record<string, unknown>): string[] {
       }
     } else if (!chatModelId && activeFirstModelId) {
       out.chatModelId = activeFirstModelId;
+    }
+    const maxTokens = asInt(out.maxTokens);
+    if (maxTokens !== undefined && maxTokens <= 0) {
+      delete out.maxTokens;
     }
     assistantIds.add(asString(out.id));
     return out;

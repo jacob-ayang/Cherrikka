@@ -311,6 +311,51 @@ describe('settings mapping', () => {
     expect(assistants[0].maxTokens).toBe(1024);
   });
 
+  it('drops assistant maxTokens when value is 0', () => {
+    const [normalized] = normalizeFromCherryConfig({
+      'cherry.persistSlices': {
+        assistants: {
+          assistants: [
+            {
+              id: 'a1',
+              name: 'A1',
+              prompt: 'p',
+              model: { id: 'm1' },
+              settings: {
+                contextCount: '16',
+                streamOutput: 'true',
+                maxTokens: '0',
+              },
+            },
+          ],
+        },
+        settings: {},
+        llm: {
+          defaultModel: { id: 'm1' },
+          providers: [{ id: 'p1', type: 'openai', models: [{ id: 'm1' }] }],
+        },
+      },
+    });
+
+    const ir: BackupIR = {
+      sourceApp: 'cherry-studio',
+      sourceFormat: 'cherry',
+      createdAt: new Date().toISOString(),
+      assistants: [],
+      conversations: [],
+      files: [],
+      config: {},
+      settings: normalized,
+      opaque: {},
+      secrets: {},
+      warnings: [],
+    };
+
+    const [settings] = buildRikkaSettingsFromIR(ir, {});
+    const assistants = settings.assistants as Array<Record<string, unknown>>;
+    expect(assistants[0].maxTokens).toBeUndefined();
+  });
+
   it('builds cherry model objects from rikka provider modelId aliases', () => {
     const [normalized] = normalizeFromRikkaConfig({
       'rikka.settings': {

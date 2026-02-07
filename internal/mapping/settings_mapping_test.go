@@ -358,6 +358,50 @@ func TestBuildRikkaSettingsFromIR_AssistantStringNumbersCoerced(t *testing.T) {
 	}
 }
 
+func TestBuildRikkaSettingsFromIR_AssistantZeroMaxTokensDropped(t *testing.T) {
+	cfg := map[string]any{
+		"cherry.persistSlices": map[string]any{
+			"assistants": map[string]any{
+				"assistants": []any{
+					map[string]any{
+						"id":     "a1",
+						"name":   "A1",
+						"prompt": "p",
+						"model":  map[string]any{"id": "m1"},
+						"settings": map[string]any{
+							"contextCount": "16",
+							"streamOutput": "true",
+							"maxTokens":    "0",
+						},
+					},
+				},
+			},
+			"llm": map[string]any{
+				"defaultModel": map[string]any{"id": "m1"},
+				"providers": []any{
+					map[string]any{"id": "p1", "type": "openai", "models": []any{map[string]any{"id": "m1"}}},
+				},
+			},
+		},
+	}
+
+	norm, _ := NormalizeFromCherryConfig(cfg)
+	in := &ir.BackupIR{
+		SourceFormat: "cherry",
+		Settings:     norm,
+		Config:       cfg,
+	}
+	settings, _ := BuildRikkaSettingsFromIR(in, nil)
+	assistants := asSlice(settings["assistants"])
+	if len(assistants) != 1 {
+		t.Fatalf("expected 1 assistant")
+	}
+	a := asMap(assistants[0])
+	if _, ok := a["maxTokens"]; ok {
+		t.Fatalf("expected maxTokens dropped when value <= 0, got=%v", a["maxTokens"])
+	}
+}
+
 func TestBuildCherryPersistSlicesFromIR(t *testing.T) {
 	cfg := map[string]any{
 		"rikka.settings": map[string]any{
