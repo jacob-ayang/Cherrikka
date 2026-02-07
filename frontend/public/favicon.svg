@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" fill="#0a0a0a"/>
+  <rect x="8" y="8" width="48" height="48" fill="#141414" stroke="#f2f2f2" stroke-width="2"/>
+
+  <!-- Pixel-style C -->
+  <rect x="16" y="18" width="14" height="4" fill="#f2f2f2"/>
+  <rect x="16" y="22" width="4" height="20" fill="#f2f2f2"/>
+  <rect x="16" y="42" width="14" height="4" fill="#f2f2f2"/>
+
+  <!-- Pixel-style R -->
+  <rect x="34" y="18" width="4" height="28" fill="#f2f2f2"/>
+  <rect x="38" y="18" width="10" height="4" fill="#f2f2f2"/>
+  <rect x="48" y="22" width="4" height="8" fill="#f2f2f2"/>
+  <rect x="38" y="30" width="10" height="4" fill="#f2f2f2"/>
+  <rect x="44" y="34" width="4" height="4" fill="#f2f2f2"/>
+  <rect x="48" y="38" width="4" height="8" fill="#f2f2f2"/>
+</svg>
