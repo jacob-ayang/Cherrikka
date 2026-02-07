@@ -42,4 +42,7 @@ export const en: I18nText = {
   unresolvedTarget: 'Unable to determine target format, check source format selection',
   detectFailed: 'Format detection failed',
   language: 'Language',
+  theme: 'Theme',
+  themeDark: 'Dark',
+  themeLight: 'Light',
 };

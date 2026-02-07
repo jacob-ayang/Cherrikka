@@ -3,7 +3,7 @@ import { resolveTargetFormat } from '../lib/format';
 import { WorkerClient } from '../lib/worker-client';
 import { en } from '../i18n/en';
 import { zh } from '../i18n/zh';
-import type { AppLang, I18nText } from '../i18n/types';
+import type { AppLang, AppTheme, I18nText } from '../i18n/types';
 import { createActionPanel } from './components/action-panel';
 import { createFormatPanel } from './components/format-panel';
 import { createProgressPanel } from './components/progress-panel';
@@ -12,6 +12,7 @@ import { createUploadPanel } from './components/upload-panel';
 
 interface AppState {
   lang: AppLang;
+  theme: AppTheme;
   sourceFile: File | null;
   sourceFormat: SourceFormat;
   detectedFormat: DetectResultFormat;
@@ -26,6 +27,7 @@ const worker = new WorkerClient();
 export function mountApp(container: HTMLElement): void {
   const state: AppState = {
     lang: detectInitialLang(),
+    theme: detectInitialTheme(),
     sourceFile: null,
     sourceFormat: 'auto',
     detectedFormat: 'unknown',
@@ -38,6 +40,7 @@ export function mountApp(container: HTMLElement): void {
   const render = () => {
     const text = i18n(state.lang);
     container.innerHTML = '';
+    document.body.setAttribute('data-theme', state.theme);
 
     const shell = document.createElement('main');
     shell.className = 'shell';
@@ -63,6 +66,38 @@ export function mountApp(container: HTMLElement): void {
     titleWrap.append(title, subtitle);
     brand.append(icon, titleWrap);
 
+    const controls = document.createElement('div');
+    controls.className = 'top-controls';
+
+    const themeLabel = document.createElement('div');
+    themeLabel.className = 'control-label';
+    themeLabel.textContent = text.theme;
+
+    const themeToggle = document.createElement('div');
+    themeToggle.className = 'theme-toggle';
+
+    const themeDarkBtn = document.createElement('button');
+    themeDarkBtn.type = 'button';
+    themeDarkBtn.className = `theme-btn${state.theme === 'dark' ? ' active' : ''}`;
+    themeDarkBtn.textContent = text.themeDark;
+    themeDarkBtn.addEventListener('click', () => {
+      state.theme = 'dark';
+      persistTheme(state.theme);
+      render();
+    });
+
+    const themeLightBtn = document.createElement('button');
+    themeLightBtn.type = 'button';
+    themeLightBtn.className = `theme-btn${state.theme === 'light' ? ' active' : ''}`;
+    themeLightBtn.textContent = text.themeLight;
+    themeLightBtn.addEventListener('click', () => {
+      state.theme = 'light';
+      persistTheme(state.theme);
+      render();
+    });
+
+    themeToggle.append(themeDarkBtn, themeLightBtn);
+
     const langBtn = document.createElement('button');
     langBtn.type = 'button';
     langBtn.className = 'lang-toggle';
@@ -72,7 +107,8 @@ export function mountApp(container: HTMLElement): void {
       render();
     });
 
-    topbar.append(brand, langBtn);
+    controls.append(themeLabel, themeToggle, langBtn);
+    topbar.append(brand, controls);
 
     const grid = document.createElement('section');
     grid.className = 'grid';
@@ -249,6 +285,26 @@ function updateSelectedMeta(target: HTMLElement, state: AppState, text: I18nText
 function detectInitialLang(): AppLang {
   const lang = navigator.language.toLowerCase();
   return lang.startsWith('zh') ? 'zh' : 'en';
+}
+
+function detectInitialTheme(): AppTheme {
+  try {
+    const saved = window.localStorage.getItem('cherrikka.theme');
+    if (saved === 'dark' || saved === 'light') {
+      return saved;
+    }
+  } catch {
+    // ignore storage access failure
+  }
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+function persistTheme(theme: AppTheme): void {
+  try {
+    window.localStorage.setItem('cherrikka.theme', theme);
+  } catch {
+    // ignore storage access failure
+  }
 }
 
 function i18n(lang: AppLang): I18nText {

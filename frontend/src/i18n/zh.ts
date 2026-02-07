@@ -42,4 +42,7 @@ export const zh: I18nText = {
   unresolvedTarget: '无法确定目标格式，请检查源格式选择',
   detectFailed: '格式识别失败',
   language: '语言',
+  theme: '主题',
+  themeDark: '黑底白字',
+  themeLight: '白底黑字',
 };

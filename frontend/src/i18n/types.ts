@@ -1,4 +1,5 @@
 export type AppLang = 'zh' | 'en';
+export type AppTheme = 'dark' | 'light';
 
 export interface I18nText {
   appTitle: string;
@@ -42,4 +43,7 @@ export interface I18nText {
   unresolvedTarget: string;
   detectFailed: string;
   language: string;
+  theme: string;
+  themeDark: string;
+  themeLight: string;
 }
