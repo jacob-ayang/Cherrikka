@@ -42,6 +42,7 @@ func TestConvertCherryToRikkaAndBack(t *testing.T) {
 	if manifest1.SourceFormat != "cherry" || manifest1.TargetFormat != "rikka" {
 		t.Fatalf("unexpected manifest: %+v", manifest1)
 	}
+	assertZipHasEntries(t, outRikka, "rikka_hub-wal", "rikka_hub-shm")
 	assertSidecarMatchesSource(t, outRikka, srcCherryZip)
 
 	outCherry := filepath.Join(t.TempDir(), "to_cherry.zip")
@@ -276,6 +277,29 @@ func assertSidecarMatchesSource(t *testing.T, convertedZip, sourceZip string) {
 	}
 	if !seenManifest || !seenSource {
 		t.Fatalf("sidecar entries missing in output zip")
+	}
+}
+
+func assertZipHasEntries(t *testing.T, zipPath string, entries ...string) {
+	t.Helper()
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	seen := map[string]bool{}
+	for _, target := range entries {
+		seen[target] = false
+	}
+	for _, f := range zr.File {
+		if _, ok := seen[f.Name]; ok {
+			seen[f.Name] = true
+		}
+	}
+	for _, target := range entries {
+		if !seen[target] {
+			t.Fatalf("zip entry missing: %s", target)
+		}
 	}
 }
 

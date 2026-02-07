@@ -348,8 +348,9 @@ export async function buildRikkaArchiveFromIR(
 
     const dbBytes = db.export();
     outputEntries.set('rikka_hub.db', dbBytes);
-    outputEntries.delete('rikka_hub-wal');
-    outputEntries.delete('rikka_hub-shm');
+    // Force target restore flow to replace stale local WAL/SHM files.
+    outputEntries.set('rikka_hub-wal', new Uint8Array());
+    outputEntries.set('rikka_hub-shm', new Uint8Array());
   } finally {
     db.close();
   }

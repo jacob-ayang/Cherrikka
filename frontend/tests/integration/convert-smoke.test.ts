@@ -51,6 +51,8 @@ describe('convert smoke', () => {
     const outputEntries = await readZipBlob(result.outputBlob);
     expect(outputEntries.has('settings.json')).toBe(true);
     expect(outputEntries.has('rikka_hub.db')).toBe(true);
+    expect(outputEntries.has('rikka_hub-wal')).toBe(true);
+    expect(outputEntries.has('rikka_hub-shm')).toBe(true);
     expect(outputEntries.has('cherrikka/manifest.json')).toBe(true);
     expect(outputEntries.has('cherrikka/raw/source.zip')).toBe(true);
   });

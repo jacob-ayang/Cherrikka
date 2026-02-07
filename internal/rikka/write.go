@@ -46,6 +46,13 @@ func BuildFromIR(in *ir.BackupIR, outputDir, templateDir string, redactSecrets b
 	if err := createRikkaDB(dbPath, identityHash); err != nil {
 		return nil, err
 	}
+	// Ensure restore overwrites stale WAL/SHM files in target app.
+	if err := os.WriteFile(filepath.Join(outputDir, "rikka_hub-wal"), nil, 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, "rikka_hub-shm"), nil, 0o644); err != nil {
+		return nil, err
+	}
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
