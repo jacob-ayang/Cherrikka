@@ -2,6 +2,7 @@ package mapping
 
 import (
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -162,8 +163,10 @@ func buildRikkaProviders(coreProviders []any, warnings *[]string) ([]any, map[st
 		switch pType {
 		case "openai":
 			setIfPresent(provider, "apiKey", pickFirstString(raw["apiKey"]))
-			setIfPresent(provider, "baseUrl", pickFirstString(raw["baseUrl"], raw["apiHost"], "https://api.openai.com/v1"))
-			setIfPresent(provider, "chatCompletionsPath", pickFirstString(raw["chatCompletionsPath"], "/chat/completions"))
+			baseURL := normalizeOpenAIBaseURLV1(pickFirstString(raw["baseUrl"], raw["apiHost"], "https://api.openai.com/v1"))
+			setIfPresent(provider, "baseUrl", baseURL)
+			chatPath := normalizeOpenAIChatPath(pickFirstString(raw["chatCompletionsPath"], raw["apiPath"]), baseURL)
+			setIfPresent(provider, "chatCompletionsPath", chatPath)
 			if useResponseAPI, ok := coerceBool(raw["useResponseApi"]); ok {
 				provider["useResponseApi"] = useResponseAPI
 			}
@@ -677,6 +680,64 @@ func normalizeRikkaModelType(v any) string {
 	default:
 		return "CHAT"
 	}
+}
+
+func normalizeOpenAIBaseURLV1(baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return "https://api.openai.com/v1"
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return strings.TrimRight(baseURL, "/")
+	}
+	path := strings.Trim(strings.TrimSpace(u.Path), "/")
+	lowPath := strings.ToLower(path)
+	if path == "" {
+		u.Path = "/v1"
+		return strings.TrimRight(u.String(), "/")
+	}
+	if strings.HasSuffix(lowPath, "v1") || strings.HasSuffix(lowPath, "v1beta") {
+		return strings.TrimRight(u.String(), "/")
+	}
+	u.Path = "/" + strings.Trim(strings.TrimSpace(u.Path), "/") + "/v1"
+	return strings.TrimRight(u.String(), "/")
+}
+
+func normalizeOpenAIChatPath(chatPath, baseURL string) string {
+	chatPath = strings.TrimSpace(chatPath)
+	if chatPath == "" {
+		chatPath = "/chat/completions"
+	}
+	if !strings.HasPrefix(chatPath, "/") {
+		chatPath = "/" + chatPath
+	}
+	if openAIBaseHasVersion(baseURL) && strings.HasPrefix(strings.ToLower(chatPath), "/v1/") {
+		chatPath = chatPath[len("/v1"):]
+		if chatPath == "" {
+			chatPath = "/chat/completions"
+		}
+	}
+	return chatPath
+}
+
+func openAIBaseHasVersion(baseURL string) bool {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return false
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(strings.Trim(strings.TrimSpace(u.Path), "/"))
+	if path == "" {
+		return false
+	}
+	if strings.HasSuffix(path, "v1") || strings.HasSuffix(path, "v1beta") {
+		return true
+	}
+	return false
 }
 
 func normalizeModelModalities(v any) []any {

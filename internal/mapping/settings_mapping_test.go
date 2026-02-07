@@ -531,3 +531,46 @@ func TestBuildRikkaSettingsFromIR_SidecarRehydrateOverlay(t *testing.T) {
 		t.Fatalf("expected sidecar-rehydrate warning")
 	}
 }
+
+func TestBuildRikkaSettingsFromIR_OpenAIBaseURLV1Normalization(t *testing.T) {
+	in := &ir.BackupIR{
+		SourceFormat: "cherry",
+		Settings: map[string]any{
+			"core.providers": []any{
+				map[string]any{
+					"id":         "p1",
+					"name":       "herta",
+					"mappedType": "openai",
+					"raw": map[string]any{
+						"id":      "p1",
+						"name":    "herta",
+						"apiHost": "https://herta.us.ci/",
+						"models": []any{
+							map[string]any{"id": "m1", "name": "gemini-3-flash-preview"},
+						},
+					},
+				},
+			},
+			"core.assistants": []any{
+				map[string]any{"id": "a1", "name": "A1", "chatModelId": "m1", "raw": map[string]any{"id": "a1", "name": "A1", "chatModelId": "m1"}},
+			},
+			"core.models": map[string]any{
+				"chatModelId": "m1",
+			},
+		},
+		Config: map[string]any{},
+	}
+
+	settings, _ := BuildRikkaSettingsFromIR(in, map[string]any{})
+	providers := asSlice(settings["providers"])
+	if len(providers) != 1 {
+		t.Fatalf("expected 1 provider, got=%d", len(providers))
+	}
+	p := asMap(providers[0])
+	if got := pickFirstString(p["baseUrl"]); got != "https://herta.us.ci/v1" {
+		t.Fatalf("expected baseUrl normalized with /v1, got=%s", got)
+	}
+	if got := pickFirstString(p["chatCompletionsPath"]); got != "/chat/completions" {
+		t.Fatalf("expected chatCompletionsPath=/chat/completions, got=%s", got)
+	}
+}

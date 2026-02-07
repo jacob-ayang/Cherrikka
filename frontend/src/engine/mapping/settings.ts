@@ -544,9 +544,14 @@ function buildRikkaProviders(
       enabled: asBool(raw.enabled) ?? true,
     };
     if (rikkaType === 'openai') {
+      const baseUrl = normalizeOpenAIBaseUrlV1(pickFirstString(raw.baseUrl, raw.apiHost, 'https://api.openai.com/v1'));
       setIfPresent(mappedProvider, 'apiKey', pickFirstString(raw.apiKey));
-      setIfPresent(mappedProvider, 'baseUrl', pickFirstString(raw.baseUrl, raw.apiHost, 'https://api.openai.com/v1'));
-      setIfPresent(mappedProvider, 'chatCompletionsPath', pickFirstString(raw.chatCompletionsPath, '/chat/completions'));
+      setIfPresent(mappedProvider, 'baseUrl', baseUrl);
+      setIfPresent(
+        mappedProvider,
+        'chatCompletionsPath',
+        normalizeOpenAIChatPath(pickFirstString(raw.chatCompletionsPath, raw.apiPath), baseUrl),
+      );
       if (asBool(raw.useResponseApi) !== undefined) {
         mappedProvider.useResponseApi = asBool(raw.useResponseApi);
       }
@@ -1137,6 +1142,63 @@ function normalizeModelTools(value: unknown): Array<'search' | 'url_context'> {
     out.push(normalized as 'search' | 'url_context');
   }
   return out;
+}
+
+function normalizeOpenAIBaseUrlV1(baseUrl: string): string {
+  const normalized = baseUrl.trim();
+  if (!normalized) {
+    return 'https://api.openai.com/v1';
+  }
+  try {
+    const parsed = new URL(normalized);
+    const path = parsed.pathname.trim().replace(/^\/+|\/+$/g, '').toLowerCase();
+    if (!path) {
+      parsed.pathname = '/v1';
+      return parsed.toString().replace(/\/$/, '');
+    }
+    if (path.endsWith('v1') || path.endsWith('v1beta')) {
+      return parsed.toString().replace(/\/$/, '');
+    }
+    const normalizedPath = parsed.pathname.replace(/\/+$/, '');
+    parsed.pathname = `${normalizedPath}/v1`;
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return normalized.replace(/\/$/, '');
+  }
+}
+
+function normalizeOpenAIChatPath(chatPath: string, baseUrl: string): string {
+  let normalized = chatPath.trim();
+  if (!normalized) {
+    normalized = '/chat/completions';
+  }
+  if (!normalized.startsWith('/')) {
+    normalized = `/${normalized}`;
+  }
+  if (openAIBaseHasVersion(baseUrl) && normalized.toLowerCase().startsWith('/v1/')) {
+    normalized = normalized.slice('/v1'.length);
+    if (!normalized) {
+      normalized = '/chat/completions';
+    }
+  }
+  return normalized;
+}
+
+function openAIBaseHasVersion(baseUrl: string): boolean {
+  const normalized = baseUrl.trim();
+  if (!normalized) {
+    return false;
+  }
+  try {
+    const parsed = new URL(normalized);
+    const path = parsed.pathname.trim().replace(/^\/+|\/+$/g, '').toLowerCase();
+    if (!path) {
+      return false;
+    }
+    return path.endsWith('v1') || path.endsWith('v1beta');
+  } catch {
+    return false;
+  }
 }
 
 function asNumber(value: unknown): number | undefined {

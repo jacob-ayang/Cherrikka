@@ -403,4 +403,44 @@ describe('settings mapping', () => {
     expect(settings.modeInjections).toBeTruthy();
     expect(warnings).toContain('sidecar-rehydrate:rikka.settings');
   });
+
+  it('normalizes openai baseUrl to /v1 and keeps chat path for rikka', () => {
+    const ir: BackupIR = {
+      sourceApp: 'cherry-studio',
+      sourceFormat: 'cherry',
+      createdAt: new Date().toISOString(),
+      assistants: [],
+      conversations: [],
+      files: [],
+      config: {},
+      settings: {
+        'core.providers': [
+          {
+            id: 'p1',
+            name: 'herta',
+            mappedType: 'openai',
+            raw: {
+              id: 'p1',
+              name: 'herta',
+              apiHost: 'https://herta.us.ci/',
+              models: [{ id: 'm1', name: 'gemini-3-flash-preview' }],
+            },
+          },
+        ],
+        'core.assistants': [
+          { id: 'a1', name: 'A1', chatModelId: 'm1', raw: { id: 'a1', name: 'A1', chatModelId: 'm1' } },
+        ],
+        'core.models': { chatModelId: 'm1' },
+      },
+      opaque: {},
+      secrets: {},
+      warnings: [],
+    };
+
+    const [settings] = buildRikkaSettingsFromIR(ir, {});
+    const providers = settings.providers as Array<Record<string, unknown>>;
+    expect(providers).toHaveLength(1);
+    expect(providers[0].baseUrl).toBe('https://herta.us.ci/v1');
+    expect(providers[0].chatCompletionsPath).toBe('/chat/completions');
+  });
 });
