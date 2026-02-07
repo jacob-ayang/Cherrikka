@@ -18,29 +18,17 @@ export async function readZipBlob(input: Blob): Promise<Map<string, Uint8Array>>
 }
 
 function getZipProfileOptions(profile: ZipProfile): Record<string, unknown> {
-  if (profile === 'rikka') {
-    return {
-      msDosCompatible: true,
-      versionMadeBy: 20,
-      extendedTimestamp: false,
-      useUnicodeFileNames: false,
-      // Store mode + non-streaming headers maximize Rikka importer compatibility.
-      compressionMethod: 0,
-      level: 0,
-      dataDescriptor: false,
-      dataDescriptorSignature: false,
-    };
-  }
-
+  // Use store mode for both targets to maximize importer compatibility.
+  // This intentionally prioritizes deterministic compatibility over compression ratio.
   return {
     msDosCompatible: true,
     versionMadeBy: 20,
     extendedTimestamp: false,
     useUnicodeFileNames: false,
-    // Cherry side is compatible with deflate; keep compressed outputs.
-    compressionMethod: 8,
-    dataDescriptor: true,
-    dataDescriptorSignature: true,
+    compressionMethod: 0,
+    level: 0,
+    dataDescriptor: false,
+    dataDescriptorSignature: false,
   };
 }
 

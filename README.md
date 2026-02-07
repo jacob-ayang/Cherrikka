@@ -1,5 +1,7 @@
 # Cherrikka 使用说明（中文）
 
+<img src="frontend/public/favicon.svg" alt="Cherrikka Icon" width="72" />
+
 Cherrikka 用来在 **Cherry Studio** 和 **RikkaHub** 备份之间互转。  
 你可以用两种方式：
 

@@ -45,6 +45,14 @@ export function mountApp(container: HTMLElement): void {
     const topbar = document.createElement('header');
     topbar.className = 'topbar';
 
+    const brand = document.createElement('div');
+    brand.className = 'app-brand';
+
+    const icon = document.createElement('img');
+    icon.className = 'app-icon';
+    icon.src = '/favicon.svg';
+    icon.alt = 'Cherrikka Icon';
+
     const titleWrap = document.createElement('div');
     const title = document.createElement('h1');
     title.className = 'title';
@@ -53,6 +61,7 @@ export function mountApp(container: HTMLElement): void {
     subtitle.className = 'subtitle';
     subtitle.textContent = text.appSubtitle;
     titleWrap.append(title, subtitle);
+    brand.append(icon, titleWrap);
 
     const langBtn = document.createElement('button');
     langBtn.type = 'button';
@@ -63,7 +72,7 @@ export function mountApp(container: HTMLElement): void {
       render();
     });
 
-    topbar.append(titleWrap, langBtn);
+    topbar.append(brand, langBtn);
 
     const grid = document.createElement('section');
     grid.className = 'grid';

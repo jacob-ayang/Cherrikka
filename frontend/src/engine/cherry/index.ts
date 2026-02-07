@@ -1,6 +1,6 @@
 import { readJsonEntry, writeJsonEntry } from '../backup/zip';
 import type { BackupIR, IRConversation, IRFile, IRMessage, IRPart } from '../ir/types';
-import { asArray, asRecord, asString, cloneJson, dedupeStrings, nowIso, normalizeText, toRfc3339, truncate } from '../util/common';
+import { asArray, asBoolean, asRecord, asString, cloneJson, dedupeStrings, nowIso, normalizeText, toRfc3339, truncate } from '../util/common';
 import { extname, guessLogicalType, normalizePath } from '../util/file';
 import { marshalGoJSON } from '../util/go_json';
 import { sha256Hex } from '../util/hash';
@@ -488,13 +488,85 @@ function buildPersistSlices(ir: BackupIR, redact: boolean, warnings: string[]): 
   };
 
   slices.llm = buildCherryLlm(ir, warnings);
-  slices.settings = asRecord(slices.settings);
-  slices.backup = asRecord(slices.backup);
+  slices.settings = buildCherrySettings(ir, slices);
+  slices.backup = buildCherryBackupSlice(asRecord(slices.backup));
 
   if (redact) {
     return redactPersistSlices(slices);
   }
   return slices;
+}
+
+function buildCherrySettings(ir: BackupIR, slices: Record<string, unknown>): Record<string, unknown> {
+  const existing = asRecord(slices.settings);
+  if (Object.keys(existing).length > 0) {
+    return cloneJson(existing);
+  }
+
+  const fromCherry = asRecord(ir.config['cherry.settings']);
+  if (Object.keys(fromCherry).length > 0) {
+    return cloneJson(fromCherry);
+  }
+
+  const rikka = asRecord(ir.config['rikka.settings']);
+  const settings: Record<string, unknown> = {};
+
+  const ui = asRecord(asRecord(rikka.displaySetting).profile);
+  settings.userId = asString(ui.userId) || asString(rikka.userId) || newId();
+  settings.userName = asString(ui.userName) || asString(rikka.userName);
+  const language = asString(ui.language).trim();
+  if (language) settings.language = language;
+  const targetLanguage = asString(ui.targetLanguage).trim();
+  if (targetLanguage) settings.targetLanguage = targetLanguage;
+
+  const assistantId = asString(rikka.assistantId) || asString(ir.assistants[0]?.id);
+  if (assistantId) settings.assistantId = assistantId;
+
+  const webdav = asRecord(rikka.webDavConfig);
+  settings.webdavHost = asString(webdav.url);
+  settings.webdavUser = asString(webdav.username);
+  settings.webdavPass = asString(webdav.password);
+  settings.webdavPath = asString(webdav.path) || '/cherry-studio';
+
+  const s3 = asRecord(rikka.s3Config);
+  if (Object.keys(s3).length > 0) {
+    settings.s3 = cloneJson(s3);
+  }
+
+  settings.enableWebSearch = asBoolean(rikka.enableWebSearch, false);
+  settings.searchServices = cloneJson(asArray(rikka.searchServices));
+  settings.searchCommonOptions = cloneJson(asRecord(rikka.searchCommonOptions));
+  settings.searchServiceSelected = rikka.searchServiceSelected ?? 0;
+
+  settings.mcpServers = cloneJson(asArray(rikka.mcpServers));
+  settings.ttsProviders = cloneJson(asArray(rikka.ttsProviders));
+  settings.selectedTTSProviderId = asString(rikka.selectedTTSProviderId);
+
+  settings.skipBackupFile = false;
+  return settings;
+}
+
+function buildCherryBackupSlice(existing: Record<string, unknown>): Record<string, unknown> {
+  if (Object.keys(existing).length > 0) {
+    return cloneJson(existing);
+  }
+  return {
+    webdavSync: {
+      syncing: false,
+      lastSyncTime: null,
+      lastSyncError: null,
+    },
+    s3Sync: {
+      syncing: false,
+      lastSyncTime: null,
+      lastSyncError: null,
+    },
+    localBackupSync: {
+      syncing: false,
+      lastSyncTime: null,
+      lastSyncError: null,
+    },
+  };
 }
 
 function buildCherryAssistants(assistants: BackupIR['assistants'], conversations: IRConversation[]): Record<string, unknown>[] {
@@ -541,64 +613,82 @@ function buildCherryLlm(ir: BackupIR, warnings: string[]): Record<string, unknow
   }
 
   const rikka = asRecord(ir.config['rikka.settings']);
-  const providers = asArray(rikka.providers).map((raw) => {
-    const provider = asRecord(raw);
-    const providerId = asString(provider.id) || newId();
+  const providers: Record<string, unknown>[] = [];
+  const modelLookup = new Map<string, Record<string, unknown>>();
+  let firstModel: Record<string, unknown> | null = null;
+
+  for (const rawProvider of asArray(rikka.providers)) {
+    const provider = asRecord(rawProvider);
+    if (Object.keys(provider).length === 0) continue;
+
     const mappedType = mapProviderTypeToCherry(asString(provider.type));
-    const models = asArray(provider.models).map((mRaw) => {
-      const m = asRecord(mRaw);
-      const id = asString(m.id) || asString(m.modelId) || newId();
-      const out: Record<string, unknown> = {
-        id,
-        modelId: asString(m.modelId) || id,
-        name: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
-        displayName: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
-        provider: providerId,
-        group: 'default',
-        type: 'CHAT',
-      };
-      if (Array.isArray(m.abilities) && m.abilities.length > 0) out.abilities = cloneJson(m.abilities);
-      if (Array.isArray(m.inputModalities) && m.inputModalities.length > 0) out.inputModalities = cloneJson(m.inputModalities);
-      if (Array.isArray(m.outputModalities) && m.outputModalities.length > 0) out.outputModalities = cloneJson(m.outputModalities);
-      if (Array.isArray(m.tools) && m.tools.length > 0) out.tools = cloneJson(m.tools);
-      return out;
-    });
-    if (models.length === 0) {
-      warnings.push(`provider-invalid-disabled:${asString(provider.name) || providerId}:no-models`);
+    if (!mappedType) {
+      warnings.push('skip unsupported canonical provider mapping to cherry');
+      continue;
     }
-    return {
-      id: providerId,
-      name: asString(provider.name) || 'Imported Provider',
-      type: mappedType,
-      apiHost: asString(provider.baseUrl),
-      baseUrl: asString(provider.baseUrl),
-      enabled: provider.enabled !== false && models.length > 0,
-      models,
-    };
-  });
 
-  const allModels = providers.flatMap((p) => asArray<Record<string, unknown>>(p.models));
-  const fallbackModel = allModels[0] ?? {
-    id: 'default-model',
-    modelId: 'gpt-4o-mini',
-    name: 'gpt-4o-mini',
-    displayName: 'gpt-4o-mini',
-    provider: asString(providers[0]?.id) || 'openai',
-    group: 'default',
-    type: 'CHAT',
-  };
-  const defaultModel = pickRikkaSelectionModel(allModels, asString(rikka.chatModelId), fallbackModel);
-  const quickModel = pickRikkaSelectionModel(allModels, asString(rikka.suggestionModelId), defaultModel);
-  const translateModel = pickRikkaSelectionModel(allModels, asString(rikka.translateModeId), defaultModel);
-  const topicNamingModel = pickRikkaSelectionModel(allModels, asString(rikka.titleModelId), defaultModel);
+    const base = cloneJson(provider);
+    const providerId = asString(base.id) || newId();
+    base.id = providerId;
+    if (!asString(base.name)) {
+      base.name = asString(provider.name) || 'Imported Provider';
+    }
+    base.type = mappedType;
 
-  return {
-    providers,
-    defaultModel,
-    quickModel,
-    translateModel,
-    topicNamingModel,
-  };
+    const normalizedModels: Record<string, unknown>[] = [];
+    for (const rawModel of asArray(base.models)) {
+      const modelSrc = asRecord(rawModel);
+      if (Object.keys(modelSrc).length === 0) continue;
+
+      const sourceId = asString(modelSrc.id);
+      const modelId =
+        asString(modelSrc.modelId) ||
+        asString(modelSrc.id) ||
+        asString(modelSrc.name) ||
+        asString(modelSrc.displayName) ||
+        newId();
+
+      const model = cloneJson(modelSrc);
+      model.id = modelId;
+      model.provider = providerId;
+      model.name = asString(modelSrc.name) || asString(modelSrc.displayName) || asString(modelSrc.modelId) || modelId;
+      if (!asString(model.group)) {
+        model.group = 'default';
+      }
+      if (!asString(model.modelId)) {
+        model.modelId = modelId;
+      }
+      registerCherryModelAlias(modelLookup, sourceId, model);
+      registerCherryModelAlias(modelLookup, asString(model.id), model);
+      registerCherryModelAlias(modelLookup, asString(model.modelId), model);
+      registerCherryModelAlias(modelLookup, asString(model.name), model);
+      registerCherryModelAlias(modelLookup, asString(model.displayName), model);
+      if (!firstModel) {
+        firstModel = cloneJson(model);
+      }
+      normalizedModels.push(model);
+    }
+
+    if (normalizedModels.length === 0) {
+      base.models = [];
+      base.enabled = false;
+      warnings.push(`provider-invalid-disabled:${asString(base.name) || providerId}:no-models`);
+    } else {
+      base.models = normalizedModels;
+    }
+
+    if (!asString(base.apiHost) && asString(base.baseUrl)) {
+      base.apiHost = asString(base.baseUrl);
+    }
+    providers.push(base);
+  }
+
+  const llm: Record<string, unknown> = { providers };
+  applyCherrySelection(llm, 'defaultModel', modelLookup, firstModel, warnings, rikka.defaultModel, rikka.chatModelId);
+  applyCherrySelection(llm, 'quickModel', modelLookup, firstModel, warnings, rikka.quickModel, rikka.suggestionModelId);
+  applyCherrySelection(llm, 'translateModel', modelLookup, firstModel, warnings, rikka.translateModel, rikka.translateModeId);
+  applyCherrySelection(llm, 'topicNamingModel', modelLookup, firstModel, warnings, rikka.topicNamingModel, rikka.titleModelId);
+  return llm;
 }
 
 function decodePersistSlices(payload: string): Record<string, unknown> {
@@ -741,21 +831,92 @@ function uniqueAssistantName(name: string, used: Set<string>): string {
 
 function mapProviderTypeToCherry(rawType: string): string {
   const clean = rawType.trim().toLowerCase();
+  if (!clean) return '';
   if (clean === 'claude' || clean === 'anthropic' || clean === 'vertex-anthropic') return 'anthropic';
   if (clean === 'google' || clean === 'gemini' || clean === 'vertexai') return 'gemini';
-  return 'openai';
+  if (['openai', 'openai-response', 'new-api', 'gateway', 'azure-openai', 'ollama', 'lmstudio', 'gpustack', 'aws-bedrock'].includes(clean)) {
+    return 'openai';
+  }
+  return '';
 }
 
-function pickRikkaSelectionModel(
-  models: Record<string, unknown>[],
-  selectedId: string,
-  fallbackModel: Record<string, unknown>,
-): Record<string, unknown> {
-  if (selectedId) {
-    const selected = models.find((model) => asString(model.id) === selectedId || asString(model.modelId) === selectedId);
-    if (selected) return selected;
+function registerCherryModelAlias(
+  lookup: Map<string, Record<string, unknown>>,
+  key: string,
+  model: Record<string, unknown>,
+): void {
+  const clean = key.trim();
+  if (!clean) return;
+  if (!lookup.has(clean)) {
+    lookup.set(clean, cloneJson(model));
   }
-  return fallbackModel;
+  const lower = clean.toLowerCase();
+  if (!lookup.has(lower)) {
+    lookup.set(lower, cloneJson(model));
+  }
+}
+
+function resolveCherryModel(
+  candidate: unknown,
+  lookup: Map<string, Record<string, unknown>>,
+): Record<string, unknown> | null {
+  const resolveByString = (value: string): Record<string, unknown> | null => {
+    const clean = value.trim();
+    if (!clean) return null;
+    const direct = lookup.get(clean);
+    if (direct) return cloneJson(direct);
+    const lower = lookup.get(clean.toLowerCase());
+    if (lower) return cloneJson(lower);
+    return null;
+  };
+
+  const candidateString = asString(candidate);
+  if (candidateString) {
+    const match = resolveByString(candidateString);
+    if (match) return match;
+  }
+
+  const candidateMap = asRecord(candidate);
+  if (Object.keys(candidateMap).length === 0) return null;
+  for (const key of ['id', 'modelId', 'name', 'displayName']) {
+    const match = resolveByString(asString(candidateMap[key]));
+    if (match) return match;
+  }
+
+  const modelId =
+    asString(candidateMap.modelId) ||
+    asString(candidateMap.id) ||
+    asString(candidateMap.name) ||
+    asString(candidateMap.displayName);
+  if (!modelId) return null;
+
+  const out = cloneJson(candidateMap);
+  out.id = modelId;
+  out.name = asString(candidateMap.name) || asString(candidateMap.displayName) || modelId;
+  if (!asString(out.group)) out.group = 'default';
+  if (!asString(out.modelId)) out.modelId = modelId;
+  return out;
+}
+
+function applyCherrySelection(
+  llm: Record<string, unknown>,
+  key: string,
+  lookup: Map<string, Record<string, unknown>>,
+  firstModel: Record<string, unknown> | null,
+  warnings: string[],
+  ...candidates: unknown[]
+): void {
+  for (const candidate of candidates) {
+    const model = resolveCherryModel(candidate, lookup);
+    if (model) {
+      llm[key] = model;
+      return;
+    }
+  }
+  if (firstModel) {
+    llm[key] = cloneJson(firstModel);
+    warnings.push(`provider-invalid-disabled:model-selection-fallback:${key}`);
+  }
 }
 
 function extractIndexedDbExtra(indexedDb: Record<string, unknown>): Record<string, unknown> {
