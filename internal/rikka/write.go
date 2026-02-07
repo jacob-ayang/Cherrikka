@@ -206,7 +206,7 @@ func writeConversations(
 		if _, err := db.Exec(`INSERT INTO ConversationEntity (id, assistant_id, title, nodes, create_at, update_at, truncate_index, suggestions, is_pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			convID,
 			assistantID,
-			fallbackName(conv.Title, "Imported Conversation"),
+			deriveRikkaConversationTitle(conv),
 			"[]",
 			created,
 			updated,
@@ -242,6 +242,64 @@ func writeConversations(
 		}
 	}
 	return dedupeWarnings(warnings), nil
+}
+
+func deriveRikkaConversationTitle(conv ir.IRConversation) string {
+	if title := normalizeConversationTitleText(conv.Title); title != "" {
+		return title
+	}
+	if title := deriveTitleFromMessages(conv.Messages, true); title != "" {
+		return title
+	}
+	if title := deriveTitleFromMessages(conv.Messages, false); title != "" {
+		return title
+	}
+	return "Imported Conversation"
+}
+
+func deriveTitleFromMessages(messages []ir.IRMessage, preferUser bool) string {
+	for _, m := range messages {
+		if preferUser && !strings.EqualFold(strings.TrimSpace(m.Role), "user") {
+			continue
+		}
+		for _, p := range m.Parts {
+			switch p.Type {
+			case "text", "reasoning":
+				if title := normalizeConversationTitleText(p.Content); title != "" {
+					return title
+				}
+			case "tool":
+				if title := normalizeConversationTitleText(p.Name); title != "" {
+					return title
+				}
+				if title := normalizeConversationTitleText(p.Content); title != "" {
+					return title
+				}
+			case "document", "image", "video", "audio":
+				if title := normalizeConversationTitleText(p.Name); title != "" {
+					return title
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func normalizeConversationTitleText(input string) string {
+	s := strings.TrimSpace(input)
+	if s == "" {
+		return ""
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if s == "" {
+		return ""
+	}
+	runes := []rune(s)
+	const maxRunes = 80
+	if len(runes) > maxRunes {
+		s = strings.TrimSpace(string(runes[:maxRunes])) + "…"
+	}
+	return s
 }
 
 func rikkaMessageFromIR(m ir.IRMessage, filePathByID map[string]string) map[string]any {

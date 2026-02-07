@@ -571,7 +571,7 @@ function writeConversations(
       [
         convId,
         resolveAssistantId(asString(conversation.assistantId)),
-        pickFirstString(conversation.title, 'Imported Conversation'),
+        deriveRikkaConversationTitle(conversation),
         '[]',
         parseTimeMillis(conversation.createdAt),
         parseTimeMillis(conversation.updatedAt),
@@ -600,6 +600,58 @@ function writeConversations(
   }
 
   return dedupeStrings(warnings);
+}
+
+function deriveRikkaConversationTitle(conversation: IRConversation): string {
+  const existing = normalizeConversationTitleText(conversation.title ?? '');
+  if (existing) {
+    return existing;
+  }
+  const fromUser = deriveTitleFromMessages(conversation.messages, true);
+  if (fromUser) {
+    return fromUser;
+  }
+  const fromAny = deriveTitleFromMessages(conversation.messages, false);
+  if (fromAny) {
+    return fromAny;
+  }
+  return 'Imported Conversation';
+}
+
+function deriveTitleFromMessages(messages: IRMessage[], preferUser: boolean): string {
+  for (const message of messages) {
+    if (preferUser && normalizeRikkaRole(message.role) !== 'user') {
+      continue;
+    }
+    for (const part of message.parts) {
+      if (part.type === 'text' || part.type === 'reasoning') {
+        const title = normalizeConversationTitleText(part.content ?? '');
+        if (title) return title;
+      } else if (part.type === 'tool') {
+        const byName = normalizeConversationTitleText(part.name ?? '');
+        if (byName) return byName;
+        const byContent = normalizeConversationTitleText(part.content ?? '');
+        if (byContent) return byContent;
+      } else if (part.type === 'document' || part.type === 'image' || part.type === 'video' || part.type === 'audio') {
+        const title = normalizeConversationTitleText(part.name ?? '');
+        if (title) return title;
+      }
+    }
+  }
+  return '';
+}
+
+function normalizeConversationTitleText(input: string): string {
+  const normalized = input.trim().replace(/\s+/g, ' ');
+  if (!normalized) {
+    return '';
+  }
+  const chars = Array.from(normalized);
+  const maxChars = 80;
+  if (chars.length > maxChars) {
+    return `${chars.slice(0, maxChars).join('').trim()}…`;
+  }
+  return normalized;
 }
 
 function rikkaMessageFromIR(message: IRMessage, filePathById: Record<string, string>): Record<string, unknown> {

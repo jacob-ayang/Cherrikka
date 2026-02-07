@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { writeZipBlob, readZipBlob, writeJson } from '../../src/core/backup/archive';
 import { convert } from '../../src/core/service';
+import { openDatabase } from '../../src/vendor/sql';
 
 describe('convert smoke', () => {
   it('converts a minimal cherry backup to rikka with sidecar', async () => {
@@ -12,7 +13,6 @@ describe('convert smoke', () => {
         topics: [
           {
             id: 'topic-1',
-            name: 'Topic',
             assistantId: 'assistant-1',
             messages: [
               {
@@ -55,5 +55,21 @@ describe('convert smoke', () => {
     expect(outputEntries.has('rikka_hub-shm')).toBe(true);
     expect(outputEntries.has('cherrikka/manifest.json')).toBe(true);
     expect(outputEntries.has('cherrikka/raw/source.zip')).toBe(true);
+
+    const dbBytes = outputEntries.get('rikka_hub.db');
+    expect(dbBytes).toBeTruthy();
+    const db = await openDatabase(dbBytes!);
+    try {
+      const stmt = db.prepare('SELECT title FROM ConversationEntity LIMIT 1');
+      try {
+        expect(stmt.step()).toBe(true);
+        const row = stmt.getAsObject() as Record<string, unknown>;
+        expect(String(row.title)).toBe('hello');
+      } finally {
+        stmt.free();
+      }
+    } finally {
+      db.close();
+    }
   });
 });

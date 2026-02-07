@@ -2,6 +2,7 @@ package app
 
 import (
 	"archive/zip"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"cherrikka/internal/ir"
 	"cherrikka/internal/rikka"
 	"cherrikka/internal/util"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestConvertCherryToRikkaAndBack(t *testing.T) {
@@ -103,6 +106,42 @@ func TestConvertWithRedaction(t *testing.T) {
 	}
 	if !containsString(string(b), "***REDACTED***") {
 		t.Fatalf("expected redacted marker in output")
+	}
+}
+
+func TestConvertCherryToRikka_DerivesTitleWhenTopicNameMissing(t *testing.T) {
+	srcCherryZip := buildSampleCherryBackupWithoutTopicName(t)
+	outRikka := filepath.Join(t.TempDir(), "to_rikka_no_topic_name.zip")
+	if _, err := Convert(ConvertOptions{
+		InputPath:  srcCherryZip,
+		OutputPath: outRikka,
+		From:       "auto",
+		To:         "rikka",
+	}); err != nil {
+		t.Fatalf("convert cherry->rikka failed: %v", err)
+	}
+
+	val, err := Validate(outRikka)
+	if err != nil {
+		t.Fatalf("validate rikka failed: %v", err)
+	}
+	if !val.Valid {
+		t.Fatalf("expected valid rikka output, got issues=%v", val.Issues)
+	}
+
+	dir := unzipTemp(t, outRikka)
+	db, err := sql.Open("sqlite", filepath.Join(dir, "rikka_hub.db"))
+	if err != nil {
+		t.Fatalf("open output db failed: %v", err)
+	}
+	defer db.Close()
+
+	var title string
+	if err := db.QueryRow(`SELECT title FROM ConversationEntity LIMIT 1`).Scan(&title); err != nil {
+		t.Fatalf("query title failed: %v", err)
+	}
+	if title == "" || title == "Imported Conversation" {
+		t.Fatalf("expected derived title, got=%q", title)
 	}
 }
 
@@ -200,6 +239,60 @@ func buildSampleRikkaBackup(t *testing.T) string {
 		t.Fatalf("build rikka from IR failed: %v", err)
 	}
 	zipPath := filepath.Join(t.TempDir(), "sample_rikka.zip")
+	zipDir(t, dataDir, zipPath)
+	return zipPath
+}
+
+func buildSampleCherryBackupWithoutTopicName(t *testing.T) string {
+	t.Helper()
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "Data", "Files"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "Data", "Files", ".keep"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	data := map[string]any{
+		"time":    time.Now().UnixMilli(),
+		"version": 5,
+		"localStorage": map[string]any{
+			"persist:cherry-studio": "{}",
+		},
+		"indexedDB": map[string]any{
+			"topics": []any{
+				map[string]any{
+					"id": "topic-1",
+					"messages": []any{
+						map[string]any{
+							"id":        "msg-1",
+							"role":      "user",
+							"createdAt": time.Now().UTC().Format(time.RFC3339),
+							"blocks":    []any{"block-1"},
+						},
+					},
+				},
+			},
+			"message_blocks": []any{
+				map[string]any{
+					"id":        "block-1",
+					"messageId": "msg-1",
+					"type":      "main_text",
+					"content":   "Hello from title fallback",
+				},
+			},
+			"files": []any{},
+		},
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "data.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	zipPath := filepath.Join(t.TempDir(), "sample_cherry_no_topic_name.zip")
 	zipDir(t, dataDir, zipPath)
 	return zipPath
 }
