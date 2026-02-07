@@ -550,6 +550,10 @@ function buildRikkaAssistants(
     const assistantSeed = pickFirstString(assistant.id, assistant.name, newId());
     assistant.id = ensureUuid(asString(assistant.id), `assistant:${assistantSeed}`);
     if (!asString(assistant.name)) assistant.name = 'Imported Assistant';
+    sanitizeAssistantUuidArray(assistant, 'mcpServers', warnings);
+    sanitizeAssistantUuidArray(assistant, 'tags', warnings);
+    sanitizeAssistantUuidArray(assistant, 'modeInjectionIds', warnings);
+    sanitizeAssistantUuidArray(assistant, 'lorebookIds', warnings);
     const chatModelRaw = pickFirstString(assistant.chatModelId);
     if (chatModelRaw) {
       const resolved = resolveModelId(chatModelRaw, modelAlias);
@@ -762,6 +766,38 @@ function registerModelAlias(modelAlias: Map<string, string>, key: string, modelI
   if (!modelAlias.has(lower)) {
     modelAlias.set(lower, modelId);
   }
+}
+
+function sanitizeAssistantUuidArray(
+  assistant: Record<string, unknown>,
+  key: string,
+  warnings: string[],
+): void {
+  if (!Object.prototype.hasOwnProperty.call(assistant, key)) {
+    return;
+  }
+  const values = asArray(assistant[key]);
+  if (values.length === 0) {
+    delete assistant[key];
+    return;
+  }
+  const kept: string[] = [];
+  for (const value of values) {
+    let id = pickFirstString(value);
+    if (!id) {
+      const map = asMap(value);
+      id = pickFirstString(map.id, map.uuid);
+    }
+    if (id && uuidValidate(id)) {
+      kept.push(id);
+    }
+  }
+  if (kept.length === 0) {
+    delete assistant[key];
+    warnings.push(`dropped non-uuid assistant field: ${key}`);
+    return;
+  }
+  assistant[key] = kept;
 }
 
 function ensureUuid(candidate: string, seed: string): string {

@@ -123,4 +123,53 @@ describe('settings mapping', () => {
     expect(assistants[0].chatModelId).toBeTruthy();
     expect(assistants[0].chatModelId).toBe(settings.chatModelId);
   });
+
+  it('drops invalid assistant mcpServers objects that are not uuid arrays', () => {
+    const [normalized] = normalizeFromCherryConfig({
+      'cherry.persistSlices': {
+        assistants: {
+          assistants: [
+            {
+              id: 'a1',
+              name: 'A1',
+              prompt: 'hello',
+              model: { id: 'gpt-4o-mini' },
+              mcpServers: [{ id: 'not-uuid' }],
+            },
+          ],
+        },
+        settings: {},
+        llm: {
+          defaultModel: { id: 'gpt-4o-mini' },
+          providers: [
+            {
+              id: 'p1',
+              type: 'openai',
+              models: [{ id: 'gpt-4o-mini', modelId: 'gpt-4o-mini', name: 'gpt-4o-mini' }],
+            },
+          ],
+        },
+      },
+    });
+
+    const ir: BackupIR = {
+      sourceApp: 'cherry-studio',
+      sourceFormat: 'cherry',
+      createdAt: new Date().toISOString(),
+      assistants: [],
+      conversations: [],
+      files: [],
+      config: {},
+      settings: normalized,
+      opaque: {},
+      secrets: {},
+      warnings: [],
+    };
+
+    const [settings, warnings] = buildRikkaSettingsFromIR(ir, {});
+    const assistants = settings.assistants as Array<Record<string, unknown>>;
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0].mcpServers).toBeUndefined();
+    expect(warnings).toContain('dropped non-uuid assistant field: mcpServers');
+  });
 });

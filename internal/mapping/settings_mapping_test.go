@@ -143,6 +143,58 @@ func TestBuildRikkaSettingsFromIR_AssistantMissingModelFallsBack(t *testing.T) {
 	}
 }
 
+func TestBuildRikkaSettingsFromIR_DropInvalidAssistantUUIDCollections(t *testing.T) {
+	cfg := map[string]any{
+		"cherry.persistSlices": map[string]any{
+			"assistants": map[string]any{
+				"assistants": []any{
+					map[string]any{
+						"id":     "a1",
+						"name":   "A1",
+						"prompt": "p",
+						"model":  map[string]any{"id": "m1"},
+						"mcpServers": []any{
+							map[string]any{"id": "not-uuid"},
+						},
+					},
+				},
+			},
+			"llm": map[string]any{
+				"defaultModel": map[string]any{"id": "m1"},
+				"providers": []any{
+					map[string]any{"id": "p1", "type": "openai", "models": []any{map[string]any{"id": "m1"}}},
+				},
+			},
+		},
+	}
+
+	norm, _ := NormalizeFromCherryConfig(cfg)
+	in := &ir.BackupIR{
+		SourceFormat: "cherry",
+		Settings:     norm,
+		Config:       cfg,
+	}
+	settings, warnings := BuildRikkaSettingsFromIR(in, nil)
+	assistants := asSlice(settings["assistants"])
+	if len(assistants) == 0 {
+		t.Fatalf("expected mapped assistant")
+	}
+	first := asMap(assistants[0])
+	if _, exists := first["mcpServers"]; exists {
+		t.Fatalf("expected invalid assistant mcpServers to be dropped")
+	}
+	foundWarning := false
+	for _, w := range warnings {
+		if w == "dropped non-uuid assistant field: mcpServers" {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("expected warning for dropped assistant mcpServers, got=%v", warnings)
+	}
+}
+
 func TestBuildCherryPersistSlicesFromIR(t *testing.T) {
 	cfg := map[string]any{
 		"rikka.settings": map[string]any{

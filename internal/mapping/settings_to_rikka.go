@@ -206,6 +206,10 @@ func buildRikkaAssistants(in *ir.BackupIR, coreAssistants []any, modelAlias map[
 		if str(raw["name"]) == "" {
 			raw["name"] = "Imported Assistant"
 		}
+		sanitizeAssistantUUIDListField(raw, "mcpServers", warnings)
+		sanitizeAssistantUUIDListField(raw, "tags", warnings)
+		sanitizeAssistantUUIDListField(raw, "modeInjectionIds", warnings)
+		sanitizeAssistantUUIDListField(raw, "lorebookIds", warnings)
 		if chatModel := pickFirstString(raw["chatModelId"]); chatModel != "" {
 			if resolved := resolveModelID(chatModel, modelAlias); resolved != "" {
 				raw["chatModelId"] = resolved
@@ -451,4 +455,32 @@ func registerModelAlias(alias map[string]string, key, value string) {
 	if _, ok := alias[low]; !ok {
 		alias[low] = value
 	}
+}
+
+func sanitizeAssistantUUIDListField(raw map[string]any, key string, warnings *[]string) {
+	if _, ok := raw[key]; !ok {
+		return
+	}
+	items := asSlice(raw[key])
+	if len(items) == 0 {
+		delete(raw, key)
+		return
+	}
+	kept := make([]any, 0, len(items))
+	for _, item := range items {
+		id := pickFirstString(item)
+		if id == "" {
+			m := asMap(item)
+			id = pickFirstString(m["id"], m["uuid"])
+		}
+		if isValidUUID(id) {
+			kept = append(kept, id)
+		}
+	}
+	if len(kept) == 0 {
+		delete(raw, key)
+		*warnings = appendUnique(*warnings, "dropped non-uuid assistant field: "+key)
+		return
+	}
+	raw[key] = kept
 }
