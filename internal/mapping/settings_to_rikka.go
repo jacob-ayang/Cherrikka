@@ -2,6 +2,7 @@ package mapping
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	guuid "github.com/google/uuid"
@@ -145,16 +146,36 @@ func buildRikkaProviders(coreProviders []any, warnings *[]string) ([]any, map[st
 
 		providerSeed := pickFirstString(raw["id"], pm["id"], raw["name"], pm["name"], mapped, util.NewUUID())
 		providerID := ensureUUID(pickFirstString(raw["id"], pm["id"]), "provider:"+providerSeed)
-		raw["id"] = providerID
-
-		if raw["name"] == nil || str(raw["name"]) == "" {
-			raw["name"] = pickFirstString(pm["name"], strings.ToUpper(mapped), "Imported Provider")
+		provider := map[string]any{
+			"id":      providerID,
+			"name":    pickFirstString(raw["name"], pm["name"], strings.ToUpper(mapped), "Imported Provider"),
+			"type":    pType,
+			"enabled": true,
 		}
-		raw["type"] = pType
-		if baseURL := pickFirstString(raw["baseUrl"]); baseURL == "" {
-			if apiHost := pickFirstString(raw["apiHost"]); apiHost != "" {
-				raw["baseUrl"] = apiHost
+		if enabled, ok := coerceBool(raw["enabled"]); ok {
+			provider["enabled"] = enabled
+		}
+		switch pType {
+		case "openai":
+			setIfPresent(provider, "apiKey", pickFirstString(raw["apiKey"]))
+			setIfPresent(provider, "baseUrl", pickFirstString(raw["baseUrl"], raw["apiHost"], "https://api.openai.com/v1"))
+			setIfPresent(provider, "chatCompletionsPath", pickFirstString(raw["chatCompletionsPath"], "/chat/completions"))
+			if useResponseAPI, ok := coerceBool(raw["useResponseApi"]); ok {
+				provider["useResponseApi"] = useResponseAPI
 			}
+		case "claude":
+			setIfPresent(provider, "apiKey", pickFirstString(raw["apiKey"]))
+			setIfPresent(provider, "baseUrl", pickFirstString(raw["baseUrl"], raw["apiHost"], "https://api.anthropic.com/v1"))
+		case "google":
+			setIfPresent(provider, "apiKey", pickFirstString(raw["apiKey"]))
+			setIfPresent(provider, "baseUrl", pickFirstString(raw["baseUrl"], raw["apiHost"], "https://generativelanguage.googleapis.com/v1beta"))
+			if vertexAI, ok := coerceBool(raw["vertexAI"]); ok {
+				provider["vertexAI"] = vertexAI
+			}
+			setIfPresent(provider, "privateKey", pickFirstString(raw["privateKey"]))
+			setIfPresent(provider, "serviceAccountEmail", pickFirstString(raw["serviceAccountEmail"]))
+			setIfPresent(provider, "location", pickFirstString(raw["location"]))
+			setIfPresent(provider, "projectId", pickFirstString(raw["projectId"]))
 		}
 
 		rawModels := asSlice(raw["models"])
@@ -170,27 +191,38 @@ func buildRikkaProviders(coreProviders []any, warnings *[]string) ([]any, map[st
 				modelRef = util.NewUUID()
 			}
 			modelID := ensureUUID(pickFirstString(mm["id"]), "model:"+providerID+":"+modelRef)
-			mm["id"] = modelID
-
-			if pickFirstString(mm["modelId"]) == "" {
-				mm["modelId"] = modelRef
+			modelType := normalizeRikkaModelType(mm["type"])
+			if pickFirstString(mm["type"]) != "" && modelType != strings.ToUpper(strings.TrimSpace(pickFirstString(mm["type"]))) {
+				*warnings = appendUnique(*warnings, "normalized unsupported model type to CHAT: "+pickFirstString(mm["type"]))
 			}
-			if pickFirstString(mm["displayName"]) == "" {
-				mm["displayName"] = pickFirstString(mm["name"], mm["modelId"])
+			model := map[string]any{
+				"id":          modelID,
+				"modelId":     pickFirstString(mm["modelId"], modelRef),
+				"displayName": pickFirstString(mm["displayName"], mm["name"], modelRef),
+				"type":        modelType,
 			}
-			if pickFirstString(mm["type"]) == "" {
-				mm["type"] = "CHAT"
+			if vals := normalizeModelModalities(mm["inputModalities"]); len(vals) > 0 {
+				model["inputModalities"] = vals
+			}
+			if vals := normalizeModelModalities(mm["outputModalities"]); len(vals) > 0 {
+				model["outputModalities"] = vals
+			}
+			if vals := normalizeModelAbilities(mm["abilities"]); len(vals) > 0 {
+				model["abilities"] = vals
+			}
+			if vals := normalizeModelTools(mm["tools"]); len(vals) > 0 {
+				model["tools"] = vals
 			}
 
 			registerModelAlias(modelAlias, modelRef, modelID)
-			registerModelAlias(modelAlias, pickFirstString(mm["id"]), modelID)
-			registerModelAlias(modelAlias, pickFirstString(mm["displayName"]), modelID)
+			registerModelAlias(modelAlias, pickFirstString(model["id"]), modelID)
+			registerModelAlias(modelAlias, pickFirstString(model["displayName"]), modelID)
 			registerModelAlias(modelAlias, pickFirstString(mm["name"]), modelID)
-			normModels = append(normModels, mm)
+			normModels = append(normModels, model)
 		}
-		raw["models"] = normModels
+		provider["models"] = normModels
 
-		out = append(out, raw)
+		out = append(out, provider)
 	}
 
 	return out, modelAlias
@@ -203,30 +235,66 @@ func buildRikkaAssistants(in *ir.BackupIR, coreAssistants []any, modelAlias map[
 		if len(raw) == 0 {
 			return
 		}
-		assistantSeed := pickFirstString(raw["id"], raw["name"], util.NewUUID())
-		raw["id"] = ensureUUID(pickFirstString(raw["id"]), "assistant:"+assistantSeed)
-		assignUniqueAssistantName(raw, usedNames, warnings)
-		sanitizeAssistantUUIDListField(raw, "mcpServers", warnings)
-		sanitizeAssistantUUIDListField(raw, "tags", warnings)
-		sanitizeAssistantUUIDListField(raw, "modeInjectionIds", warnings)
-		sanitizeAssistantUUIDListField(raw, "lorebookIds", warnings)
-		if chatModel := pickFirstString(raw["chatModelId"]); chatModel != "" {
+		assistant := map[string]any{
+			"id":           pickFirstString(raw["id"]),
+			"name":         pickFirstString(raw["name"]),
+			"systemPrompt": pickFirstString(raw["systemPrompt"]),
+			"chatModelId":  pickFirstString(raw["chatModelId"]),
+		}
+		if temperature, ok := coerceFloat(raw["temperature"]); ok {
+			assistant["temperature"] = temperature
+		}
+		if topP, ok := coerceFloat(raw["topP"]); ok {
+			assistant["topP"] = topP
+		}
+		if contextSize, ok := coerceInt(raw["contextMessageSize"]); ok {
+			assistant["contextMessageSize"] = contextSize
+		}
+		if stream, ok := coerceBool(raw["streamOutput"]); ok {
+			assistant["streamOutput"] = stream
+		}
+		if maxTokens, ok := coerceInt(raw["maxTokens"]); ok {
+			assistant["maxTokens"] = maxTokens
+		}
+		if enableMemory, ok := coerceBool(raw["enableMemory"]); ok {
+			assistant["enableMemory"] = enableMemory
+		}
+		if useGlobalMemory, ok := coerceBool(raw["useGlobalMemory"]); ok {
+			assistant["useGlobalMemory"] = useGlobalMemory
+		}
+		if enableRecentChatsReference, ok := coerceBool(raw["enableRecentChatsReference"]); ok {
+			assistant["enableRecentChatsReference"] = enableRecentChatsReference
+		}
+		setIfPresent(assistant, "messageTemplate", pickFirstString(raw["messageTemplate"]))
+		assistant["mcpServers"] = cloneAny(raw["mcpServers"])
+		assistant["tags"] = cloneAny(raw["tags"])
+		assistant["modeInjectionIds"] = cloneAny(raw["modeInjectionIds"])
+		assistant["lorebookIds"] = cloneAny(raw["lorebookIds"])
+
+		assistantSeed := pickFirstString(assistant["id"], assistant["name"], util.NewUUID())
+		assistant["id"] = ensureUUID(pickFirstString(assistant["id"]), "assistant:"+assistantSeed)
+		assignUniqueAssistantName(assistant, usedNames, warnings)
+		sanitizeAssistantUUIDListField(assistant, "mcpServers", warnings)
+		sanitizeAssistantUUIDListField(assistant, "tags", warnings)
+		sanitizeAssistantUUIDListField(assistant, "modeInjectionIds", warnings)
+		sanitizeAssistantUUIDListField(assistant, "lorebookIds", warnings)
+		if chatModel := pickFirstString(assistant["chatModelId"]); chatModel != "" {
 			if resolved := resolveModelID(chatModel, modelAlias); resolved != "" {
-				raw["chatModelId"] = resolved
+				assistant["chatModelId"] = resolved
 			} else {
-				delete(raw, "chatModelId")
+				delete(assistant, "chatModelId")
 				*warnings = appendUnique(*warnings, "assistant chat model not found, dropped: "+chatModel)
 			}
 		} else {
-			delete(raw, "chatModelId")
+			delete(assistant, "chatModelId")
 		}
-		if _, ok := raw["streamOutput"]; !ok {
-			raw["streamOutput"] = true
+		if _, ok := assistant["streamOutput"]; !ok {
+			assistant["streamOutput"] = true
 		}
-		if _, ok := raw["contextMessageSize"]; !ok {
-			raw["contextMessageSize"] = 64
+		if _, ok := assistant["contextMessageSize"]; !ok {
+			assistant["contextMessageSize"] = 64
 		}
-		out = append(out, raw)
+		out = append(out, assistant)
 	}
 
 	for _, item := range coreAssistants {
@@ -310,9 +378,7 @@ func enforceRikkaConsistency(settings map[string]any) []string {
 			if pickFirstString(mm["displayName"]) == "" {
 				mm["displayName"] = pickFirstString(mm["name"], mm["modelId"])
 			}
-			if pickFirstString(mm["type"]) == "" {
-				mm["type"] = "CHAT"
-			}
+			mm["type"] = normalizeRikkaModelType(mm["type"])
 
 			id := pickFirstString(mm["id"])
 			if id != "" {
@@ -505,4 +571,134 @@ func assignUniqueAssistantName(raw map[string]any, used map[string]struct{}, war
 	if name != base {
 		*warnings = appendUnique(*warnings, "assistant name conflict renamed: "+base+" -> "+name)
 	}
+}
+
+func coerceBool(v any) (bool, bool) {
+	switch t := v.(type) {
+	case bool:
+		return t, true
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(t))
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func coerceInt(v any) (int64, bool) {
+	switch t := v.(type) {
+	case int:
+		return int64(t), true
+	case int8:
+		return int64(t), true
+	case int16:
+		return int64(t), true
+	case int32:
+		return int64(t), true
+	case int64:
+		return t, true
+	case float32:
+		return int64(t), true
+	case float64:
+		return int64(t), true
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func coerceFloat(v any) (float64, bool) {
+	switch t := v.(type) {
+	case float32:
+		return float64(t), true
+	case float64:
+		return t, true
+	case int:
+		return float64(t), true
+	case int8:
+		return float64(t), true
+	case int16:
+		return float64(t), true
+	case int32:
+		return float64(t), true
+	case int64:
+		return float64(t), true
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(t), 64)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func normalizeRikkaModelType(v any) string {
+	switch strings.ToUpper(strings.TrimSpace(pickFirstString(v))) {
+	case "IMAGE":
+		return "IMAGE"
+	case "EMBEDDING":
+		return "EMBEDDING"
+	default:
+		return "CHAT"
+	}
+}
+
+func normalizeModelModalities(v any) []any {
+	out := []any{}
+	seen := map[string]struct{}{}
+	for _, item := range asSlice(v) {
+		val := strings.ToUpper(strings.TrimSpace(pickFirstString(item)))
+		if val != "TEXT" && val != "IMAGE" {
+			continue
+		}
+		if _, exists := seen[val]; exists {
+			continue
+		}
+		seen[val] = struct{}{}
+		out = append(out, val)
+	}
+	return out
+}
+
+func normalizeModelAbilities(v any) []any {
+	out := []any{}
+	seen := map[string]struct{}{}
+	for _, item := range asSlice(v) {
+		val := strings.ToUpper(strings.TrimSpace(pickFirstString(item)))
+		if val != "TOOL" && val != "REASONING" {
+			continue
+		}
+		if _, exists := seen[val]; exists {
+			continue
+		}
+		seen[val] = struct{}{}
+		out = append(out, val)
+	}
+	return out
+}
+
+func normalizeModelTools(v any) []any {
+	out := []any{}
+	seen := map[string]struct{}{}
+	for _, item := range asSlice(v) {
+		val := strings.TrimSpace(pickFirstString(item))
+		switch strings.ToLower(val) {
+		case "search":
+			val = "search"
+		case "url_context":
+			val = "url_context"
+		default:
+			continue
+		}
+		if _, exists := seen[val]; exists {
+			continue
+		}
+		seen[val] = struct{}{}
+		out = append(out, val)
+	}
+	return out
 }

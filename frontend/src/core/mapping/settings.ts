@@ -2,6 +2,7 @@ import type { BackupIR } from '../ir/types';
 import { validate as uuidValidate, v5 as uuidv5 } from 'uuid';
 import {
   asArray,
+  asBool,
   asMap,
   asString,
   cloneAny,
@@ -509,9 +510,33 @@ function buildRikkaProviders(
     }
     const raw = cloneAny(asMap(provider.raw)) as Record<string, unknown>;
     const providerSeed = pickFirstString(raw.id, provider.id, raw.name, provider.name, mappedType, newId());
-    raw.id = ensureUuid(pickFirstString(raw.id, provider.id), `provider:${providerSeed}`);
-    if (!asString(raw.name)) raw.name = pickFirstString(provider.name, mappedType.toUpperCase());
-    raw.type = rikkaType;
+    const mappedProvider: Record<string, unknown> = {
+      id: ensureUuid(pickFirstString(raw.id, provider.id), `provider:${providerSeed}`),
+      name: pickFirstString(raw.name, provider.name, mappedType.toUpperCase(), 'Imported Provider'),
+      type: rikkaType,
+      enabled: asBool(raw.enabled) ?? true,
+    };
+    if (rikkaType === 'openai') {
+      setIfPresent(mappedProvider, 'apiKey', pickFirstString(raw.apiKey));
+      setIfPresent(mappedProvider, 'baseUrl', pickFirstString(raw.baseUrl, raw.apiHost, 'https://api.openai.com/v1'));
+      setIfPresent(mappedProvider, 'chatCompletionsPath', pickFirstString(raw.chatCompletionsPath, '/chat/completions'));
+      if (asBool(raw.useResponseApi) !== undefined) {
+        mappedProvider.useResponseApi = asBool(raw.useResponseApi);
+      }
+    } else if (rikkaType === 'claude') {
+      setIfPresent(mappedProvider, 'apiKey', pickFirstString(raw.apiKey));
+      setIfPresent(mappedProvider, 'baseUrl', pickFirstString(raw.baseUrl, raw.apiHost, 'https://api.anthropic.com/v1'));
+    } else if (rikkaType === 'google') {
+      setIfPresent(mappedProvider, 'apiKey', pickFirstString(raw.apiKey));
+      setIfPresent(mappedProvider, 'baseUrl', pickFirstString(raw.baseUrl, raw.apiHost, 'https://generativelanguage.googleapis.com/v1beta'));
+      if (asBool(raw.vertexAI) !== undefined) {
+        mappedProvider.vertexAI = asBool(raw.vertexAI);
+      }
+      setIfPresent(mappedProvider, 'privateKey', pickFirstString(raw.privateKey));
+      setIfPresent(mappedProvider, 'serviceAccountEmail', pickFirstString(raw.serviceAccountEmail));
+      setIfPresent(mappedProvider, 'location', pickFirstString(raw.location));
+      setIfPresent(mappedProvider, 'projectId', pickFirstString(raw.projectId));
+    }
     const normalizedModels: Record<string, unknown>[] = [];
     for (const modelValue of asArray(raw.models)) {
       const model = cloneAny(asMap(modelValue)) as Record<string, unknown>;
@@ -519,22 +544,42 @@ function buildRikkaProviders(
         continue;
       }
       const modelRef = pickFirstString(model.modelId, model.id, model.name, model.displayName, newId());
-      const modelId = ensureUuid(asString(model.id), `model:${raw.id as string}:${modelRef}`);
-      model.id = modelId;
-      if (!asString(model.modelId)) model.modelId = modelRef;
-      if (!asString(model.displayName)) model.displayName = pickFirstString(model.name, model.modelId, modelId);
-      if (!asString(model.type)) model.type = 'CHAT';
+      const modelId = ensureUuid(asString(model.id), `model:${mappedProvider.id as string}:${modelRef}`);
+      const normalizedType = normalizeRikkaModelType(model.type);
+      const originalType = asString(model.type).toUpperCase();
+      if (asString(model.type) && originalType !== normalizedType) {
+        warnings.push(`normalized unsupported model type to CHAT: ${asString(model.type)}`);
+      }
+      const safeModel: Record<string, unknown> = {
+        id: modelId,
+        modelId: pickFirstString(model.modelId, modelRef),
+        displayName: pickFirstString(model.displayName, model.name, modelRef),
+        type: normalizedType,
+      };
+      const inputModalities = normalizeModelModalities(model.inputModalities);
+      if (inputModalities.length > 0) {
+        safeModel.inputModalities = inputModalities;
+      }
+      const outputModalities = normalizeModelModalities(model.outputModalities);
+      if (outputModalities.length > 0) {
+        safeModel.outputModalities = outputModalities;
+      }
+      const abilities = normalizeModelAbilities(model.abilities);
+      if (abilities.length > 0) {
+        safeModel.abilities = abilities;
+      }
+      const tools = normalizeModelTools(model.tools);
+      if (tools.length > 0) {
+        safeModel.tools = tools;
+      }
       registerModelAlias(modelAlias, modelRef, modelId);
-      registerModelAlias(modelAlias, asString(model.id), modelId);
-      registerModelAlias(modelAlias, asString(model.displayName), modelId);
+      registerModelAlias(modelAlias, asString(safeModel.id), modelId);
+      registerModelAlias(modelAlias, asString(safeModel.displayName), modelId);
       registerModelAlias(modelAlias, asString(model.name), modelId);
-      normalizedModels.push(model);
+      normalizedModels.push(safeModel);
     }
-    raw.models = normalizedModels;
-    if (!asString(raw.baseUrl) && asString(raw.apiHost)) {
-      raw.baseUrl = raw.apiHost;
-    }
-    result.push(raw);
+    mappedProvider.models = normalizedModels;
+    result.push(mappedProvider);
   }
   return result;
 }
@@ -548,28 +593,72 @@ function buildRikkaAssistants(
   const result: Record<string, unknown>[] = [];
   const usedAssistantNames = new Set<string>();
   const pushAssistant = (assistant: Record<string, unknown>): void => {
-    const assistantSeed = pickFirstString(assistant.id, assistant.name, newId());
-    assistant.id = ensureUuid(asString(assistant.id), `assistant:${assistantSeed}`);
-    assignUniqueAssistantName(assistant, usedAssistantNames, warnings);
-    sanitizeAssistantUuidArray(assistant, 'mcpServers', warnings);
-    sanitizeAssistantUuidArray(assistant, 'tags', warnings);
-    sanitizeAssistantUuidArray(assistant, 'modeInjectionIds', warnings);
-    sanitizeAssistantUuidArray(assistant, 'lorebookIds', warnings);
-    const chatModelRaw = pickFirstString(assistant.chatModelId);
+    const mapped: Record<string, unknown> = {
+      id: pickFirstString(assistant.id),
+      name: pickFirstString(assistant.name),
+      systemPrompt: pickFirstString(assistant.systemPrompt),
+      chatModelId: pickFirstString(assistant.chatModelId),
+      mcpServers: cloneAny(assistant.mcpServers),
+      tags: cloneAny(assistant.tags),
+      modeInjectionIds: cloneAny(assistant.modeInjectionIds),
+      lorebookIds: cloneAny(assistant.lorebookIds),
+    };
+    const temperature = asNumber(assistant.temperature);
+    if (temperature !== undefined) {
+      mapped.temperature = temperature;
+    }
+    const topP = asNumber(assistant.topP);
+    if (topP !== undefined) {
+      mapped.topP = topP;
+    }
+    const contextMessageSize = asInt(assistant.contextMessageSize);
+    if (contextMessageSize !== undefined) {
+      mapped.contextMessageSize = contextMessageSize;
+    }
+    const streamOutput = asBool(assistant.streamOutput);
+    if (streamOutput !== undefined) {
+      mapped.streamOutput = streamOutput;
+    }
+    const maxTokens = asInt(assistant.maxTokens);
+    if (maxTokens !== undefined) {
+      mapped.maxTokens = maxTokens;
+    }
+    const enableMemory = asBool(assistant.enableMemory);
+    if (enableMemory !== undefined) {
+      mapped.enableMemory = enableMemory;
+    }
+    const useGlobalMemory = asBool(assistant.useGlobalMemory);
+    if (useGlobalMemory !== undefined) {
+      mapped.useGlobalMemory = useGlobalMemory;
+    }
+    const enableRecentChatsReference = asBool(assistant.enableRecentChatsReference);
+    if (enableRecentChatsReference !== undefined) {
+      mapped.enableRecentChatsReference = enableRecentChatsReference;
+    }
+    setIfPresent(mapped, 'messageTemplate', pickFirstString(assistant.messageTemplate));
+
+    const assistantSeed = pickFirstString(mapped.id, mapped.name, newId());
+    mapped.id = ensureUuid(asString(mapped.id), `assistant:${assistantSeed}`);
+    assignUniqueAssistantName(mapped, usedAssistantNames, warnings);
+    sanitizeAssistantUuidArray(mapped, 'mcpServers', warnings);
+    sanitizeAssistantUuidArray(mapped, 'tags', warnings);
+    sanitizeAssistantUuidArray(mapped, 'modeInjectionIds', warnings);
+    sanitizeAssistantUuidArray(mapped, 'lorebookIds', warnings);
+    const chatModelRaw = pickFirstString(mapped.chatModelId);
     if (chatModelRaw) {
       const resolved = resolveModelId(chatModelRaw, modelAlias);
       if (resolved) {
-        assistant.chatModelId = resolved;
+        mapped.chatModelId = resolved;
       } else {
-        delete assistant.chatModelId;
+        delete mapped.chatModelId;
         warnings.push(`assistant chat model not found, dropped: ${chatModelRaw}`);
       }
     } else {
-      delete assistant.chatModelId;
+      delete mapped.chatModelId;
     }
-    if (!Object.prototype.hasOwnProperty.call(assistant, 'streamOutput')) assistant.streamOutput = true;
-    if (!Object.prototype.hasOwnProperty.call(assistant, 'contextMessageSize')) assistant.contextMessageSize = 64;
-    result.push(assistant);
+    if (!Object.prototype.hasOwnProperty.call(mapped, 'streamOutput')) mapped.streamOutput = true;
+    if (!Object.prototype.hasOwnProperty.call(mapped, 'contextMessageSize')) mapped.contextMessageSize = 64;
+    result.push(mapped);
   };
 
   for (const value of coreAssistants) {
@@ -650,7 +739,7 @@ function enforceRikkaConsistency(settings: Record<string, unknown>): string[] {
       model.id = ensureUuid(asString(model.id), `model:consistency:${asString(out.id)}:${modelRef}`);
       if (!asString(model.modelId)) model.modelId = modelRef;
       if (!asString(model.displayName)) model.displayName = pickFirstString(model.name, model.modelId, model.id);
-      if (!asString(model.type)) model.type = 'CHAT';
+      model.type = normalizeRikkaModelType(model.type);
       const modelId = asString(model.id);
       if (modelId) {
         modelIds.add(modelId);
@@ -818,6 +907,85 @@ function assignUniqueAssistantName(
   if (name !== base) {
     warnings.push(`assistant name conflict renamed: ${base} -> ${name}`);
   }
+}
+
+function normalizeRikkaModelType(value: unknown): 'CHAT' | 'IMAGE' | 'EMBEDDING' {
+  const normalized = asString(value).toUpperCase();
+  if (normalized === 'IMAGE') return 'IMAGE';
+  if (normalized === 'EMBEDDING') return 'EMBEDDING';
+  return 'CHAT';
+}
+
+function normalizeModelModalities(value: unknown): Array<'TEXT' | 'IMAGE'> {
+  const out: Array<'TEXT' | 'IMAGE'> = [];
+  const seen = new Set<string>();
+  for (const item of asArray(value)) {
+    const normalized = asString(item).toUpperCase();
+    if (normalized !== 'TEXT' && normalized !== 'IMAGE') {
+      continue;
+    }
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    out.push(normalized as 'TEXT' | 'IMAGE');
+  }
+  return out;
+}
+
+function normalizeModelAbilities(value: unknown): Array<'TOOL' | 'REASONING'> {
+  const out: Array<'TOOL' | 'REASONING'> = [];
+  const seen = new Set<string>();
+  for (const item of asArray(value)) {
+    const normalized = asString(item).toUpperCase();
+    if (normalized !== 'TOOL' && normalized !== 'REASONING') {
+      continue;
+    }
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    out.push(normalized as 'TOOL' | 'REASONING');
+  }
+  return out;
+}
+
+function normalizeModelTools(value: unknown): Array<'search' | 'url_context'> {
+  const out: Array<'search' | 'url_context'> = [];
+  const seen = new Set<string>();
+  for (const item of asArray(value)) {
+    const normalized = asString(item).toLowerCase();
+    if (normalized !== 'search' && normalized !== 'url_context') {
+      continue;
+    }
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    out.push(normalized as 'search' | 'url_context');
+  }
+  return out;
+}
+
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+}
+
+function asInt(value: unknown): number | undefined {
+  const num = asNumber(value);
+  if (num === undefined) {
+    return undefined;
+  }
+  return Math.trunc(num);
 }
 
 function ensureUuid(candidate: string, seed: string): string {

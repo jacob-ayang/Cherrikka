@@ -217,4 +217,96 @@ describe('settings mapping', () => {
     expect(assistants[1].name).toBe('默认助手 (2)');
     expect(warnings).toContain('assistant name conflict renamed: 默认助手 -> 默认助手 (2)');
   });
+
+  it('normalizes unsupported model type to CHAT when building rikka settings', () => {
+    const [normalized] = normalizeFromCherryConfig({
+      'cherry.persistSlices': {
+        assistants: {
+          assistants: [{ id: 'a1', name: 'A1', prompt: 'p', model: { id: 'm1' } }],
+        },
+        settings: {},
+        llm: {
+          defaultModel: { id: 'm1' },
+          providers: [
+            {
+              id: 'p1',
+              type: 'openai',
+              models: [{ id: 'm1', type: 'invalid-type' }],
+            },
+          ],
+        },
+      },
+    });
+
+    const ir: BackupIR = {
+      sourceApp: 'cherry-studio',
+      sourceFormat: 'cherry',
+      createdAt: new Date().toISOString(),
+      assistants: [],
+      conversations: [],
+      files: [],
+      config: {},
+      settings: normalized,
+      opaque: {},
+      secrets: {},
+      warnings: [],
+    };
+
+    const [settings, warnings] = buildRikkaSettingsFromIR(ir, {});
+    const providers = settings.providers as Array<Record<string, unknown>>;
+    const models = providers[0].models as Array<Record<string, unknown>>;
+    expect(models[0].type).toBe('CHAT');
+    expect(warnings).toContain('normalized unsupported model type to CHAT: invalid-type');
+  });
+
+  it('coerces assistant numeric and boolean fields from string inputs', () => {
+    const [normalized] = normalizeFromCherryConfig({
+      'cherry.persistSlices': {
+        assistants: {
+          assistants: [
+            {
+              id: 'a1',
+              name: 'A1',
+              prompt: 'p',
+              model: { id: 'm1' },
+              settings: {
+                temperature: '0.7',
+                topP: '0.8',
+                contextCount: '16',
+                streamOutput: 'true',
+                maxTokens: '1024',
+              },
+            },
+          ],
+        },
+        settings: {},
+        llm: {
+          defaultModel: { id: 'm1' },
+          providers: [{ id: 'p1', type: 'openai', models: [{ id: 'm1' }] }],
+        },
+      },
+    });
+
+    const ir: BackupIR = {
+      sourceApp: 'cherry-studio',
+      sourceFormat: 'cherry',
+      createdAt: new Date().toISOString(),
+      assistants: [],
+      conversations: [],
+      files: [],
+      config: {},
+      settings: normalized,
+      opaque: {},
+      secrets: {},
+      warnings: [],
+    };
+
+    const [settings] = buildRikkaSettingsFromIR(ir, {});
+    const assistants = settings.assistants as Array<Record<string, unknown>>;
+    expect(assistants[0].temperature).toBe(0.7);
+    expect(assistants[0].topP).toBe(0.8);
+    expect(assistants[0].contextMessageSize).toBe(16);
+    expect(assistants[0].streamOutput).toBe(true);
+    expect(assistants[0].maxTokens).toBe(1024);
+  });
 });

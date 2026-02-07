@@ -36,6 +36,21 @@ func ValidateExtracted(dir string) error {
 	}
 	defer db.Close()
 
+	validAssistantIDs := map[string]struct{}{}
+	if b, err := os.ReadFile(filepath.Join(dir, "settings.json")); err == nil {
+		settings := map[string]any{}
+		if err := json.Unmarshal(b, &settings); err != nil {
+			issues = append(issues, "parse settings.json failed: "+err.Error())
+		} else {
+			for _, item := range asSlice(settings["assistants"]) {
+				assistant := asMap(item)
+				if id := str(assistant["id"]); id != "" {
+					validAssistantIDs[id] = struct{}{}
+				}
+			}
+		}
+	}
+
 	managed := map[string]struct{}{}
 	rows, err := db.Query(`SELECT relative_path FROM managed_files`)
 	if err == nil {
@@ -83,6 +98,22 @@ func ValidateExtracted(dir string) error {
 					if _, ok := managed[rel]; !ok {
 						issues = append(issues, "message_node file url has no managed_files entry: "+rel)
 					}
+				}
+			}
+		}
+	}
+	if len(validAssistantIDs) > 0 {
+		convRows, err := db.Query(`SELECT DISTINCT assistant_id FROM ConversationEntity`)
+		if err == nil {
+			defer convRows.Close()
+			for convRows.Next() {
+				var assistantID string
+				if err := convRows.Scan(&assistantID); err != nil {
+					issues = append(issues, "scan ConversationEntity assistant_id failed: "+err.Error())
+					continue
+				}
+				if _, ok := validAssistantIDs[strings.TrimSpace(assistantID)]; !ok && strings.TrimSpace(assistantID) != "" {
+					issues = append(issues, "conversation assistant_id missing in settings.assistants: "+assistantID)
 				}
 			}
 		}

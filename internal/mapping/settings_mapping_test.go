@@ -245,6 +245,119 @@ func TestBuildRikkaSettingsFromIR_AssistantNameConflictRenamed(t *testing.T) {
 	}
 }
 
+func TestBuildRikkaSettingsFromIR_NormalizeInvalidModelType(t *testing.T) {
+	cfg := map[string]any{
+		"cherry.persistSlices": map[string]any{
+			"assistants": map[string]any{
+				"assistants": []any{
+					map[string]any{"id": "a1", "name": "A1", "prompt": "p", "model": map[string]any{"id": "m1"}},
+				},
+			},
+			"llm": map[string]any{
+				"defaultModel": map[string]any{"id": "m1"},
+				"providers": []any{
+					map[string]any{
+						"id":   "p1",
+						"type": "openai",
+						"models": []any{
+							map[string]any{"id": "m1", "type": "invalid-type"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	norm, _ := NormalizeFromCherryConfig(cfg)
+	in := &ir.BackupIR{
+		SourceFormat: "cherry",
+		Settings:     norm,
+		Config:       cfg,
+	}
+
+	settings, warnings := BuildRikkaSettingsFromIR(in, nil)
+	providers := asSlice(settings["providers"])
+	if len(providers) != 1 {
+		t.Fatalf("expected 1 provider")
+	}
+	models := asSlice(asMap(providers[0])["models"])
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model")
+	}
+	modelType := str(asMap(models[0])["type"])
+	if modelType != "CHAT" {
+		t.Fatalf("expected model type CHAT, got=%v", modelType)
+	}
+	found := false
+	for _, w := range warnings {
+		if w == "normalized unsupported model type to CHAT: invalid-type" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected normalization warning, got=%v", warnings)
+	}
+}
+
+func TestBuildRikkaSettingsFromIR_AssistantStringNumbersCoerced(t *testing.T) {
+	cfg := map[string]any{
+		"cherry.persistSlices": map[string]any{
+			"assistants": map[string]any{
+				"assistants": []any{
+					map[string]any{
+						"id":     "a1",
+						"name":   "A1",
+						"prompt": "p",
+						"model":  map[string]any{"id": "m1"},
+						"settings": map[string]any{
+							"temperature":  "0.7",
+							"topP":         "0.8",
+							"contextCount": "16",
+							"streamOutput": "true",
+							"maxTokens":    "1024",
+						},
+					},
+				},
+			},
+			"llm": map[string]any{
+				"defaultModel": map[string]any{"id": "m1"},
+				"providers": []any{
+					map[string]any{"id": "p1", "type": "openai", "models": []any{map[string]any{"id": "m1"}}},
+				},
+			},
+		},
+	}
+
+	norm, _ := NormalizeFromCherryConfig(cfg)
+	in := &ir.BackupIR{
+		SourceFormat: "cherry",
+		Settings:     norm,
+		Config:       cfg,
+	}
+	settings, _ := BuildRikkaSettingsFromIR(in, nil)
+	assistants := asSlice(settings["assistants"])
+	if len(assistants) != 1 {
+		t.Fatalf("expected 1 assistant")
+	}
+	a := asMap(assistants[0])
+	if _, ok := a["temperature"].(float64); !ok {
+		t.Fatalf("expected temperature to be float64, got=%T", a["temperature"])
+	}
+	if _, ok := a["topP"].(float64); !ok {
+		t.Fatalf("expected topP to be float64, got=%T", a["topP"])
+	}
+	if _, ok := a["contextMessageSize"].(int64); !ok {
+		t.Fatalf("expected contextMessageSize to be int64, got=%T", a["contextMessageSize"])
+	}
+	if stream, ok := a["streamOutput"].(bool); !ok || !stream {
+		t.Fatalf("expected streamOutput bool true, got=%v (%T)", a["streamOutput"], a["streamOutput"])
+	}
+	if _, ok := a["maxTokens"].(int64); !ok {
+		t.Fatalf("expected maxTokens to be int64, got=%T", a["maxTokens"])
+	}
+}
+
 func TestBuildCherryPersistSlicesFromIR(t *testing.T) {
 	cfg := map[string]any{
 		"rikka.settings": map[string]any{
