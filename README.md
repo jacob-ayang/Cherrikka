@@ -8,6 +8,10 @@ Cherrikka 用于在 `Cherry Studio` 与 `RikkaHub` 备份 ZIP 间互转。
 1. `CLI`：适合批量、自动化、可脚本化场景。
 2. `Web 前端`：纯浏览器本地转换，适合手动操作。
 
+## 在线试用
+
+可直接访问（点击跳转）：[upw.de5.net](https://upw.de5.net)
+
 ## CLI 用法
 
 ### 环境准备
