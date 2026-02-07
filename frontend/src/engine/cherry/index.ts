@@ -23,6 +23,7 @@ import { marshalGoJSON } from '../util/go_json';
 import { newId } from '../util/id';
 import { redactAny } from '../util/redact';
 import { buildCherryPersistSlicesFromIR, normalizeFromCherryConfig } from '../mapping/settings';
+import { v5 as uuidv5 } from 'uuid';
 
 export async function parseCherryArchive(entries: ArchiveEntries): Promise<BackupIR> {
   const root = readJson<Record<string, unknown>>(entries, 'data.json') ?? {};
@@ -153,6 +154,7 @@ export async function parseCherryArchive(entries: ArchiveEntries): Promise<Backu
 
   parsePersistSlices(ir, localStorage);
   applyConversationAssistantFallbacks(ir, explicitTopicAssistant, messageAssistantByTopic);
+  applyConversationTitleFallbacks(ir);
   const isolatedUnsupported = extractCherryUnsupportedSettings(ir.config);
   if (Object.keys(isolatedUnsupported).length > 0) {
     ir.opaque['interop.cherry.unsupported'] = isolatedUnsupported;
@@ -380,6 +382,10 @@ export async function buildCherryArchiveFromIR(
 
     topics.push({
       id: topicId,
+      name: pickFirstString(conversation.title, 'Imported Conversation'),
+      assistantId: conversation.assistantId ?? '',
+      createdAt: fallbackTime(conversation.createdAt),
+      updatedAt: fallbackTime(conversation.updatedAt),
       messages: topicMessages,
     });
   }
@@ -497,6 +503,19 @@ function applyConversationAssistantFallbacks(
   }
 }
 
+function applyConversationTitleFallbacks(ir: BackupIR): void {
+  const topicNames = cherryTopicNamesFromPersist(ir);
+  for (const conversation of ir.conversations) {
+    if (pickFirstString(conversation.title) !== '') {
+      continue;
+    }
+    const topicName = pickFirstString(topicNames[conversation.id]);
+    if (topicName) {
+      conversation.title = topicName;
+    }
+  }
+}
+
 function cherryAssistantTopicsFromPersist(ir: BackupIR): Record<string, string> {
   const out: Record<string, string> = {};
   const persist = asMap(ir.config['cherry.persistSlices']);
@@ -521,6 +540,26 @@ function cherryAssistantTopicsFromPersist(ir: BackupIR): Record<string, string> 
         continue;
       }
       out[topicId] = mappedAssistantId;
+    }
+  }
+  return out;
+}
+
+function cherryTopicNamesFromPersist(ir: BackupIR): Record<string, string> {
+  const out: Record<string, string> = {};
+  const persist = asMap(ir.config['cherry.persistSlices']);
+  const assistants = asArray(asMap(persist.assistants).assistants);
+  for (const assistantValue of assistants) {
+    const assistant = asMap(assistantValue);
+    for (const topicValue of asArray(assistant.topics)) {
+      const topic = asMap(topicValue);
+      const topicId = asString(topic.id);
+      if (!topicId) continue;
+      const topicName = pickFirstString(topic.name);
+      if (!topicName) continue;
+      if (!out[topicId]) {
+        out[topicId] = topicName;
+      }
     }
   }
   return out;
@@ -785,24 +824,12 @@ function buildAssistantsSlice(
     const topics = (convByAssistant[assistantId] ?? []).map((conversation) => ({
       id: pickFirstString(conversation.id, newId()),
       assistantId,
-      name: pickFirstString(conversation.title, 'New Topic'),
+      name: pickFirstString(conversation.title, 'Imported Conversation'),
       createdAt: fallbackTime(conversation.createdAt),
       updatedAt: fallbackTime(conversation.updatedAt),
       messages: [],
       isNameManuallyEdited: true,
     }));
-
-    if (topics.length === 0) {
-      topics.push({
-        id: newId(),
-        assistantId,
-        name: 'New Topic',
-        createdAt: isoNow(),
-        updatedAt: isoNow(),
-        messages: [],
-        isNameManuallyEdited: false,
-      });
-    }
 
     return {
       id: assistantId,
@@ -924,7 +951,19 @@ function chooseCherryFileId(file: IRFile): string {
   if (isSafeStem(file.id)) {
     return file.id;
   }
-  return newId();
+  return deterministicCherryFileId(file);
+}
+
+function deterministicCherryFileId(file: IRFile): string {
+  const seedParts = [
+    file.id?.trim() ?? '',
+    file.name?.trim() ?? '',
+    file.ext?.trim() ?? '',
+    file.relativeSrc?.trim() ?? '',
+    file.hashSha256?.trim() ?? '',
+  ];
+  const seed = seedParts.join('|') || 'cherrikka:file:unknown';
+  return uuidv5(seed, uuidv5.URL);
 }
 
 function fallbackTime(value?: string): string {

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	guuid "github.com/google/uuid"
+
 	"cherrikka/internal/ir"
 	"cherrikka/internal/mapping"
 	"cherrikka/internal/util"
@@ -169,6 +171,7 @@ func ParseToIR(extractedDir string) (*ir.BackupIR, error) {
 		return nil, err
 	}
 	applyConversationAssistantFallbacks(res, explicitTopicAssistant, messageAssistantByTopic)
+	applyConversationTitleFallbacks(res)
 	if isolated := mapping.ExtractCherryUnsupportedSettings(res.Config); len(isolated) > 0 {
 		res.Opaque["interop.cherry.unsupported"] = isolated
 		res.Warnings = append(res.Warnings, "unsupported-isolated:cherry.settings")
@@ -275,6 +278,19 @@ func applyConversationAssistantFallbacks(res *ir.BackupIR, explicitTopicAssistan
 	}
 }
 
+func applyConversationTitleFallbacks(res *ir.BackupIR) {
+	topicNames := cherryTopicNamesFromPersist(res)
+	for i := range res.Conversations {
+		conv := &res.Conversations[i]
+		if strings.TrimSpace(conv.Title) != "" {
+			continue
+		}
+		if title := strings.TrimSpace(topicNames[conv.ID]); title != "" {
+			conv.Title = title
+		}
+	}
+}
+
 func cherryAssistantTopicsFromPersist(res *ir.BackupIR) map[string]string {
 	out := map[string]string{}
 	persist, _ := res.Config["cherry.persistSlices"].(map[string]any)
@@ -304,6 +320,31 @@ func cherryAssistantTopicsFromPersist(res *ir.BackupIR) map[string]string {
 				continue
 			}
 			out[topicID] = mappedAssistantID
+		}
+	}
+	return out
+}
+
+func cherryTopicNamesFromPersist(res *ir.BackupIR) map[string]string {
+	out := map[string]string{}
+	persist, _ := res.Config["cherry.persistSlices"].(map[string]any)
+	assistantsSlice, _ := persist["assistants"].(map[string]any)
+	assistants, _ := assistantsSlice["assistants"].([]any)
+	for _, item := range assistants {
+		assistant := asMap(item)
+		for _, topicItem := range toSlice(assistant["topics"]) {
+			topic := asMap(topicItem)
+			topicID := strings.TrimSpace(str(topic["id"]))
+			if topicID == "" {
+				continue
+			}
+			topicName := strings.TrimSpace(str(topic["name"]))
+			if topicName == "" {
+				continue
+			}
+			if _, exists := out[topicID]; !exists {
+				out[topicID] = topicName
+			}
 		}
 	}
 	return out
@@ -581,8 +622,12 @@ func BuildFromIR(in *ir.BackupIR, outputDir, templateDir string, redactSecrets b
 			})
 		}
 		topics = append(topics, map[string]any{
-			"id":       topicID,
-			"messages": messages,
+			"id":          topicID,
+			"name":        fallbackString(conv.Title, "Imported Conversation"),
+			"assistantId": conv.AssistantID,
+			"createdAt":   fallbackTime(conv.CreatedAt),
+			"updatedAt":   fallbackTime(conv.UpdatedAt),
+			"messages":    messages,
 		})
 	}
 	indexedDB["topics"] = topics
@@ -790,22 +835,11 @@ func buildAssistantsSlice(assistants []ir.IRAssistant, convByAssistant map[strin
 			topics = append(topics, map[string]any{
 				"id":                   c.ID,
 				"assistantId":          a.ID,
-				"name":                 fallbackString(c.Title, "New Topic"),
+				"name":                 fallbackString(c.Title, "Imported Conversation"),
 				"createdAt":            fallbackTime(c.CreatedAt),
 				"updatedAt":            fallbackTime(c.UpdatedAt),
 				"messages":             []any{},
 				"isNameManuallyEdited": true,
-			})
-		}
-		if len(topics) == 0 {
-			topics = append(topics, map[string]any{
-				"id":                   util.NewUUID(),
-				"assistantId":          a.ID,
-				"name":                 "New Topic",
-				"createdAt":            time.Now().UTC().Format(time.RFC3339),
-				"updatedAt":            time.Now().UTC().Format(time.RFC3339),
-				"messages":             []any{},
-				"isNameManuallyEdited": false,
 			})
 		}
 		arr = append(arr, map[string]any{
@@ -1006,7 +1040,22 @@ func chooseCherryFileID(f ir.IRFile) string {
 	if isSafeFileStem(f.ID) {
 		return f.ID
 	}
-	return util.NewUUID()
+	return deterministicCherryFileID(f)
+}
+
+func deterministicCherryFileID(f ir.IRFile) string {
+	seedParts := []string{
+		strings.TrimSpace(f.ID),
+		strings.TrimSpace(f.Name),
+		strings.TrimSpace(f.Ext),
+		strings.TrimSpace(f.RelativeSrc),
+		strings.TrimSpace(f.HashSHA256),
+	}
+	seed := strings.Join(seedParts, "|")
+	if strings.TrimSpace(seed) == "" {
+		seed = "cherrikka:file:unknown"
+	}
+	return guuid.NewSHA1(guuid.NameSpaceURL, []byte(seed)).String()
 }
 
 func isSafeFileStem(v string) bool {
