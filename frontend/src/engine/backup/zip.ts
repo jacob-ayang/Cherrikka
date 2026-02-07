@@ -24,6 +24,9 @@ export async function writeZipBlob(entries: Map<string, Uint8Array>): Promise<Bl
     // disabling avoids Android importer edge cases and aligns with CLI flags.
     extendedTimestamp: false,
     useUnicodeFileNames: false,
+    // Go archive/zip writes signed streaming data descriptors (PK\x07\x08).
+    // Some importers are stricter and may fail without the signature.
+    dataDescriptorSignature: true,
     keepOrder: true,
   });
   const names = [...entries.keys()].sort();
@@ -33,6 +36,7 @@ export async function writeZipBlob(entries: Map<string, Uint8Array>): Promise<Bl
       versionMadeBy: 20,
       extendedTimestamp: false,
       useUnicodeFileNames: false,
+      dataDescriptorSignature: true,
     });
   }
   return writer.close();
