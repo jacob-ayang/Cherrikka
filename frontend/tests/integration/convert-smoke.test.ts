@@ -164,4 +164,70 @@ describe('convert smoke', () => {
       db.close();
     }
   });
+
+  it('assigns unique toolCallId values for repeated cherry tool blocks', async () => {
+    const srcEntries = new Map<string, Uint8Array>();
+    writeJson(srcEntries, 'data.json', {
+      version: 5,
+      localStorage: {},
+      indexedDB: {
+        topics: [
+          {
+            id: 'topic-1',
+            assistantId: 'assistant-1',
+            messages: [
+              { id: 'message-user', role: 'user', createdAt: '2024-01-01T00:00:00.000Z', blocks: ['block-u'] },
+              { id: 'message-assistant', role: 'assistant', createdAt: '2024-01-01T00:00:01.000Z', blocks: ['block-t1', 'block-t2', 'block-t3'] },
+            ],
+          },
+        ],
+        message_blocks: [
+          { id: 'block-u', messageId: 'message-user', type: 'main_text', content: 'hi' },
+          { id: 'block-t1', messageId: 'message-assistant', type: 'tool', toolName: 'builtin_web_search', content: {} },
+          { id: 'block-t2', messageId: 'message-assistant', type: 'tool', toolName: 'builtin_web_search', content: {} },
+          { id: 'block-t3', messageId: 'message-assistant', type: 'tool', toolName: 'builtin_web_search', content: {} },
+        ],
+        files: [],
+      },
+    });
+    srcEntries.set('Data/Files/.keep', new Uint8Array());
+
+    const inputBlob = await writeZipBlob(srcEntries);
+    const inputFile = new File([inputBlob], 'src.zip', { type: 'application/zip' });
+    const result = await convert({
+      inputFile,
+      from: 'auto',
+      to: 'rikka',
+      redactSecrets: false,
+    });
+
+    const outputEntries = await readZipBlob(result.outputBlob);
+    const dbBytes = outputEntries.get('rikka_hub.db');
+    expect(dbBytes).toBeTruthy();
+    const db = await openDatabase(dbBytes!);
+    try {
+      const stmt = db.prepare('SELECT messages FROM message_node ORDER BY node_index ASC');
+      const rows: string[] = [];
+      try {
+        while (stmt.step()) {
+          const row = stmt.getAsObject() as Record<string, unknown>;
+          rows.push(String(row.messages));
+        }
+      } finally {
+        stmt.free();
+      }
+
+      const assistantRow = rows.find((row) => row.includes('builtin_web_search'));
+      expect(assistantRow).toBeTruthy();
+      const messages = JSON.parse(assistantRow!) as Array<Record<string, unknown>>;
+      const parts = (messages[0]?.parts ?? []) as Array<Record<string, unknown>>;
+      const toolIds = parts
+        .filter((part) => String(part.type) === 'me.rerere.ai.ui.UIMessagePart.Tool')
+        .map((part) => String(part.toolCallId));
+      expect(toolIds.length).toBe(3);
+      expect(new Set(toolIds).size).toBe(3);
+    } finally {
+      db.close();
+    }
+  });
 });

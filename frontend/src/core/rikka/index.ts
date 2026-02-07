@@ -656,7 +656,8 @@ function normalizeConversationTitleText(input: string): string {
 
 function rikkaMessageFromIR(message: IRMessage, filePathById: Record<string, string>): Record<string, unknown> {
   const messageId = ensureUuid(asString(message.id), `message:${pickFirstString(message.id, message.role)}`);
-  const parts = message.parts.map((part) => rikkaPartFromIR(part, filePathById));
+  const toolIdSeen = new Map<string, number>();
+  const parts = message.parts.map((part, index) => rikkaPartFromIR(messageId, index, part, filePathById, toolIdSeen));
   if (parts.length === 0) {
     parts.push({
       type: 'me.rerere.ai.ui.UIMessagePart.Text',
@@ -671,7 +672,13 @@ function rikkaMessageFromIR(message: IRMessage, filePathById: Record<string, str
   };
 }
 
-function rikkaPartFromIR(part: IRPart, filePathById: Record<string, string>): Record<string, unknown> {
+function rikkaPartFromIR(
+  messageId: string,
+  partIndex: number,
+  part: IRPart,
+  filePathById: Record<string, string>,
+  toolIdSeen: Map<string, number>,
+): Record<string, unknown> {
   switch (part.type) {
     case 'reasoning':
       return {
@@ -679,9 +686,15 @@ function rikkaPartFromIR(part: IRPart, filePathById: Record<string, string>): Re
         reasoning: part.content ?? '',
       };
     case 'tool':
+      {
+      const toolCallId = uniqueToolCallId(
+        asString(part.toolCallId),
+        `tool-call:${messageId}:${pickFirstString(part.name, 'tool')}:${partIndex}`,
+        toolIdSeen,
+      );
       return {
         type: 'me.rerere.ai.ui.UIMessagePart.Tool',
-        toolCallId: ensureUuid(asString(part.toolCallId), `tool-call:${pickFirstString(part.toolCallId, part.name)}`),
+        toolCallId,
         toolName: pickFirstString(part.name, 'tool'),
         input: pickFirstString(part.input, '{}'),
         output: (part.output ?? []).map((item) => ({
@@ -689,6 +702,7 @@ function rikkaPartFromIR(part: IRPart, filePathById: Record<string, string>): Re
           text: item.content ?? '',
         })),
       };
+      }
     case 'image':
       return {
         type: 'me.rerere.ai.ui.UIMessagePart.Image',
@@ -716,6 +730,25 @@ function rikkaPartFromIR(part: IRPart, filePathById: Record<string, string>): Re
         type: 'me.rerere.ai.ui.UIMessagePart.Text',
         text: part.content ?? '',
       };
+  }
+}
+
+function uniqueToolCallId(candidate: string, seed: string, seen: Map<string, number>): string {
+  const base = ensureUuid(candidate, seed);
+  if (!seen.has(base)) {
+    seen.set(base, 1);
+    return base;
+  }
+
+  let attempt = seen.get(base) ?? 1;
+  while (true) {
+    const alt = ensureUuid('', `${seed}#${attempt}`);
+    if (!seen.has(alt)) {
+      seen.set(base, attempt + 1);
+      seen.set(alt, 1);
+      return alt;
+    }
+    attempt += 1;
   }
 }
 

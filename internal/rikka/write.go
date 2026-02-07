@@ -305,8 +305,9 @@ func normalizeConversationTitleText(input string) string {
 func rikkaMessageFromIR(m ir.IRMessage, filePathByID map[string]string) map[string]any {
 	messageID := normalizeUUIDOrDeterministic(m.ID, "message:"+m.ID+":"+m.Role)
 	parts := make([]any, 0, len(m.Parts))
-	for _, p := range m.Parts {
-		parts = append(parts, rikkaPartFromIR(p, filePathByID))
+	toolIDSeen := map[string]int{}
+	for idx, p := range m.Parts {
+		parts = append(parts, rikkaPartFromIR(messageID, idx, p, filePathByID, toolIDSeen))
 	}
 	if len(parts) == 0 {
 		parts = append(parts, map[string]any{
@@ -322,7 +323,7 @@ func rikkaMessageFromIR(m ir.IRMessage, filePathByID map[string]string) map[stri
 	}
 }
 
-func rikkaPartFromIR(p ir.IRPart, filePathByID map[string]string) map[string]any {
+func rikkaPartFromIR(messageID string, partIndex int, p ir.IRPart, filePathByID map[string]string, toolIDSeen map[string]int) map[string]any {
 	switch p.Type {
 	case "reasoning":
 		return map[string]any{
@@ -337,9 +338,14 @@ func rikkaPartFromIR(p ir.IRPart, filePathByID map[string]string) map[string]any
 				"text": o.Content,
 			})
 		}
+		toolCallID := uniqueToolCallID(
+			p.ToolCallID,
+			fmt.Sprintf("tool-call:%s:%s:%d", messageID, p.Name, partIndex),
+			toolIDSeen,
+		)
 		return map[string]any{
 			"type":       "me.rerere.ai.ui.UIMessagePart.Tool",
-			"toolCallId": normalizeUUIDOrDeterministic(p.ToolCallID, "tool-call:"+p.ToolCallID+":"+p.Name),
+			"toolCallId": toolCallID,
 			"toolName":   fallbackName(p.Name, "tool"),
 			"input":      fallbackString(strings.TrimSpace(p.Input), "{}"),
 			"output":     out,
@@ -371,6 +377,24 @@ func rikkaPartFromIR(p ir.IRPart, filePathByID map[string]string) map[string]any
 			"type": "me.rerere.ai.ui.UIMessagePart.Text",
 			"text": p.Content,
 		}
+	}
+}
+
+func uniqueToolCallID(candidate, seed string, seen map[string]int) string {
+	base := normalizeUUIDOrDeterministic(candidate, seed)
+	if _, exists := seen[base]; !exists {
+		seen[base] = 1
+		return base
+	}
+	n := seen[base]
+	for {
+		alt := normalizeUUIDOrDeterministic("", fmt.Sprintf("%s#%d", seed, n))
+		if _, exists := seen[alt]; !exists {
+			seen[base] = n + 1
+			seen[alt] = 1
+			return alt
+		}
+		n++
 	}
 }
 
