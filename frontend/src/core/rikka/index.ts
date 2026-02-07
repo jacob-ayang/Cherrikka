@@ -845,8 +845,15 @@ function createAssistantResolver(settings: Record<string, unknown>): (candidate:
 
   return (candidate: string): string => {
     const normalized = candidate.trim();
-    if (normalized && validAssistantIds.has(normalized)) {
+    if (!normalized) {
+      return fallback;
+    }
+    if (validAssistantIds.has(normalized)) {
       return normalized;
+    }
+    const deterministic = ensureUuid(normalized, `assistant:${normalized}`);
+    if (validAssistantIds.has(deterministic)) {
+      return deterministic;
     }
     return fallback;
   };

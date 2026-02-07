@@ -55,3 +55,23 @@ func TestNormalizeConversationTitleText_TruncatesLongText(t *testing.T) {
 		t.Fatalf("expected truncated title length <= 81 runes, got=%d", len([]rune(got)))
 	}
 }
+
+func TestNewAssistantResolver_MapsDeterministicNonUUIDID(t *testing.T) {
+	defaultID := normalizeUUIDOrDeterministic("default", "assistant:default")
+	otherID := normalizeUUIDOrDeterministic("assistant-special", "assistant:assistant-special")
+	settings := map[string]any{
+		"assistantId": defaultID,
+		"assistants": []any{
+			map[string]any{"id": defaultID},
+			map[string]any{"id": otherID},
+		},
+	}
+
+	resolve := newAssistantResolver(settings)
+	if got := resolve("default"); got != defaultID {
+		t.Fatalf("expected default alias to resolve to %s, got=%s", defaultID, got)
+	}
+	if got := resolve("assistant-special"); got != otherID {
+		t.Fatalf("expected assistant-special alias to resolve to %s, got=%s", otherID, got)
+	}
+}

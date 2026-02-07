@@ -120,6 +120,8 @@ func ParseToIR(extractedDir string) (*ir.BackupIR, error) {
 		res.Files = append(res.Files, f)
 	}
 
+	explicitTopicAssistant := map[string]bool{}
+	messageAssistantByTopic := map[string]string{}
 	if raw, ok := indexed["topics"]; ok {
 		var topics []map[string]any
 		if err := json.Unmarshal(raw, &topics); err != nil {
@@ -152,6 +154,9 @@ func ParseToIR(extractedDir string) (*ir.BackupIR, error) {
 			}
 			if aid := str(topic["assistantId"]); aid != "" {
 				conv.AssistantID = aid
+				explicitTopicAssistant[conv.ID] = true
+			} else {
+				messageAssistantByTopic[conv.ID] = chooseDominantAssistantID(msgItems)
 			}
 			res.Conversations = append(res.Conversations, conv)
 		}
@@ -160,6 +165,7 @@ func ParseToIR(extractedDir string) (*ir.BackupIR, error) {
 	if err := parsePersistSlices(res, localStorage); err != nil {
 		return nil, err
 	}
+	applyConversationAssistantFallbacks(res, explicitTopicAssistant, messageAssistantByTopic)
 	settings, warnings := mapping.NormalizeFromCherryConfig(res.Config)
 	res.Settings = settings
 	res.Warnings = append(res.Warnings, warnings...)
@@ -243,6 +249,85 @@ func parsePersistSlices(res *ir.BackupIR, localStorage map[string]any) error {
 		res.Config["cherry.llm"] = llm
 	}
 	return nil
+}
+
+func applyConversationAssistantFallbacks(res *ir.BackupIR, explicitTopicAssistant map[string]bool, messageAssistantByTopic map[string]string) {
+	assistantsByTopic := cherryAssistantTopicsFromPersist(res)
+	for i := range res.Conversations {
+		conv := &res.Conversations[i]
+		if explicitTopicAssistant[conv.ID] {
+			continue
+		}
+		if aid := strings.TrimSpace(assistantsByTopic[conv.ID]); aid != "" {
+			conv.AssistantID = aid
+			continue
+		}
+		if aid := strings.TrimSpace(messageAssistantByTopic[conv.ID]); aid != "" {
+			conv.AssistantID = aid
+		}
+	}
+}
+
+func cherryAssistantTopicsFromPersist(res *ir.BackupIR) map[string]string {
+	out := map[string]string{}
+	persist, _ := res.Config["cherry.persistSlices"].(map[string]any)
+	assistantsSlice, _ := persist["assistants"].(map[string]any)
+	assistants, _ := assistantsSlice["assistants"].([]any)
+	for _, item := range assistants {
+		assistant := asMap(item)
+		assistantID := strings.TrimSpace(str(assistant["id"]))
+		for _, topicItem := range toSlice(assistant["topics"]) {
+			topic := asMap(topicItem)
+			topicID := strings.TrimSpace(str(topic["id"]))
+			if topicID == "" {
+				continue
+			}
+			mappedAssistantID := assistantID
+			topicAssistantID := strings.TrimSpace(str(topic["assistantId"]))
+			if mappedAssistantID == "" {
+				mappedAssistantID = topicAssistantID
+			} else if topicAssistantID != "" && topicAssistantID != mappedAssistantID {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("topic %s assistantId (%s) mismatches owner assistant (%s), using owner", topicID, topicAssistantID, mappedAssistantID))
+			}
+			if mappedAssistantID == "" {
+				continue
+			}
+			if existing := strings.TrimSpace(out[topicID]); existing != "" && existing != mappedAssistantID {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("topic %s mapped to multiple assistants in persist slices: %s vs %s", topicID, existing, mappedAssistantID))
+				continue
+			}
+			out[topicID] = mappedAssistantID
+		}
+	}
+	return out
+}
+
+func chooseDominantAssistantID(messages []any) string {
+	counts := map[string]int{}
+	order := []string{}
+	for _, item := range messages {
+		msgMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		assistantID := strings.TrimSpace(str(msgMap["assistantId"]))
+		if assistantID == "" {
+			continue
+		}
+		if _, exists := counts[assistantID]; !exists {
+			order = append(order, assistantID)
+		}
+		counts[assistantID]++
+	}
+	best := ""
+	bestCount := 0
+	for _, assistantID := range order {
+		if counts[assistantID] > bestCount {
+			best = assistantID
+			bestCount = counts[assistantID]
+		}
+	}
+	return best
 }
 
 func mergeDataFiles(extractedDir string, filesByID map[string]ir.IRFile) {
@@ -813,6 +898,11 @@ func toStringSlice(v any) []string {
 		}
 	}
 	return out
+}
+
+func toSlice(v any) []any {
+	arr, _ := v.([]any)
+	return arr
 }
 
 func fallbackName(v, d string) string {

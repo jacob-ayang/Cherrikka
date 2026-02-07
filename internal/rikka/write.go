@@ -477,10 +477,11 @@ func newAssistantResolver(settings map[string]any) func(string) string {
 			if _, ok := assistantIDs[candidate]; ok {
 				return candidate
 			}
-			if isValidUUID(candidate) {
-				if _, ok := assistantIDs[candidate]; ok {
-					return candidate
-				}
+			// Cherry assistant IDs are often non-UUID (for example "default").
+			// Normalize with the same deterministic seed used by settings mapping.
+			normalized := normalizeUUIDOrDeterministic(candidate, "assistant:"+candidate)
+			if _, ok := assistantIDs[normalized]; ok {
+				return normalized
 			}
 		}
 		return fallback

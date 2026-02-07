@@ -119,15 +119,24 @@ export async function parseCherryArchive(entries: ArchiveEntries): Promise<Backu
 
   ir.files = Object.values(filesById).sort((a, b) => a.id.localeCompare(b.id));
 
+  const explicitTopicAssistant = new Set<string>();
+  const messageAssistantByTopic: Record<string, string> = {};
   for (const topicRaw of asArray(indexedDB.topics)) {
     const topic = asMap(topicRaw);
+    const topicId = pickFirstString(topic.id, newId());
+    const topicAssistantId = asString(topic.assistantId);
     const conversation: IRConversation = {
-      id: pickFirstString(topic.id, newId()),
-      assistantId: asString(topic.assistantId),
+      id: topicId,
+      assistantId: topicAssistantId,
       title: pickFirstString(topic.name),
       messages: [],
       opaque: {},
     };
+    if (topicAssistantId) {
+      explicitTopicAssistant.add(topicId);
+    } else {
+      messageAssistantByTopic[topicId] = chooseDominantAssistantId(asArray(topic.messages));
+    }
 
     for (const messageRaw of asArray(topic.messages)) {
       const messageMap = asMap(messageRaw);
@@ -139,6 +148,7 @@ export async function parseCherryArchive(entries: ArchiveEntries): Promise<Backu
   }
 
   parsePersistSlices(ir, localStorage);
+  applyConversationAssistantFallbacks(ir, explicitTopicAssistant, messageAssistantByTopic);
 
   const unknownTables: Record<string, unknown> = {};
   for (const [table, value] of Object.entries(indexedDB)) {
@@ -369,6 +379,83 @@ function parsePersistSlices(ir: BackupIR, localStorage: Record<string, unknown>)
   if (decoded.llm) {
     ir.config['cherry.llm'] = decoded.llm;
   }
+}
+
+function applyConversationAssistantFallbacks(
+  ir: BackupIR,
+  explicitTopicAssistant: Set<string>,
+  messageAssistantByTopic: Record<string, string>,
+): void {
+  const assistantsByTopic = cherryAssistantTopicsFromPersist(ir);
+  for (const conversation of ir.conversations) {
+    if (explicitTopicAssistant.has(conversation.id)) {
+      continue;
+    }
+    const persistAssistantId = asString(assistantsByTopic[conversation.id]);
+    if (persistAssistantId) {
+      conversation.assistantId = persistAssistantId;
+      continue;
+    }
+    const messageAssistantId = asString(messageAssistantByTopic[conversation.id]);
+    if (messageAssistantId) {
+      conversation.assistantId = messageAssistantId;
+    }
+  }
+}
+
+function cherryAssistantTopicsFromPersist(ir: BackupIR): Record<string, string> {
+  const out: Record<string, string> = {};
+  const persist = asMap(ir.config['cherry.persistSlices']);
+  const assistants = asArray(asMap(persist.assistants).assistants);
+  for (const assistantValue of assistants) {
+    const assistant = asMap(assistantValue);
+    const assistantId = asString(assistant.id);
+    for (const topicValue of asArray(assistant.topics)) {
+      const topic = asMap(topicValue);
+      const topicId = asString(topic.id);
+      if (!topicId) continue;
+      let mappedAssistantId = assistantId;
+      const topicAssistantId = asString(topic.assistantId);
+      if (!mappedAssistantId) {
+        mappedAssistantId = topicAssistantId;
+      } else if (topicAssistantId && topicAssistantId !== mappedAssistantId) {
+        ir.warnings.push(`topic ${topicId} assistantId (${topicAssistantId}) mismatches owner assistant (${mappedAssistantId}), using owner`);
+      }
+      if (!mappedAssistantId) continue;
+      if (out[topicId] && out[topicId] !== mappedAssistantId) {
+        ir.warnings.push(`topic ${topicId} mapped to multiple assistants in persist slices: ${out[topicId]} vs ${mappedAssistantId}`);
+        continue;
+      }
+      out[topicId] = mappedAssistantId;
+    }
+  }
+  return out;
+}
+
+function chooseDominantAssistantId(messages: unknown[]): string {
+  const counts = new Map<string, number>();
+  const order: string[] = [];
+  for (const value of messages) {
+    const message = asMap(value);
+    const assistantId = asString(message.assistantId);
+    if (!assistantId) continue;
+    if (!counts.has(assistantId)) {
+      counts.set(assistantId, 1);
+      order.push(assistantId);
+    } else {
+      counts.set(assistantId, (counts.get(assistantId) ?? 0) + 1);
+    }
+  }
+  let best = '';
+  let bestCount = 0;
+  for (const assistantId of order) {
+    const count = counts.get(assistantId) ?? 0;
+    if (count > bestCount) {
+      best = assistantId;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 function toIRMessage(

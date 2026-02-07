@@ -145,6 +145,51 @@ func TestConvertCherryToRikka_DerivesTitleWhenTopicNameMissing(t *testing.T) {
 	}
 }
 
+func TestConvertCherryToRikka_RetainsConversationAssistantMappingWithoutTopicAssistantID(t *testing.T) {
+	srcCherryZip := buildSampleCherryBackupWithAssistantTopicsSlice(t)
+	outRikka := filepath.Join(t.TempDir(), "to_rikka_assistant_mapping.zip")
+	if _, err := Convert(ConvertOptions{
+		InputPath:  srcCherryZip,
+		OutputPath: outRikka,
+		From:       "auto",
+		To:         "rikka",
+	}); err != nil {
+		t.Fatalf("convert cherry->rikka failed: %v", err)
+	}
+
+	dir := unzipTemp(t, outRikka)
+	db, err := sql.Open("sqlite", filepath.Join(dir, "rikka_hub.db"))
+	if err != nil {
+		t.Fatalf("open output db failed: %v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT assistant_id, COUNT(*) FROM ConversationEntity GROUP BY assistant_id`)
+	if err != nil {
+		t.Fatalf("query assistant distribution failed: %v", err)
+	}
+	defer rows.Close()
+
+	counts := map[string]int{}
+	for rows.Next() {
+		var assistantID string
+		var cnt int
+		if err := rows.Scan(&assistantID, &cnt); err != nil {
+			t.Fatalf("scan assistant distribution failed: %v", err)
+		}
+		counts[assistantID] = cnt
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows error: %v", err)
+	}
+	if len(counts) != 2 {
+		t.Fatalf("expected 2 assistant buckets, got=%v", counts)
+	}
+	if !containsCount(counts, 1) || !containsCount(counts, 2) {
+		t.Fatalf("expected assistant distribution [2,1], got=%v", counts)
+	}
+}
+
 func buildSampleIR() *ir.BackupIR {
 	now := time.Now().UTC().Format(time.RFC3339)
 	fileID := "file-1"
@@ -297,6 +342,127 @@ func buildSampleCherryBackupWithoutTopicName(t *testing.T) string {
 	return zipPath
 }
 
+func buildSampleCherryBackupWithAssistantTopicsSlice(t *testing.T) string {
+	t.Helper()
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "Data", "Files"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "Data", "Files", ".keep"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	persist := map[string]any{
+		"assistants": map[string]any{
+			"defaultAssistant": map[string]any{"id": "default", "name": "Default"},
+			"assistants": []any{
+				map[string]any{
+					"id":   "default",
+					"name": "Default",
+					"topics": []any{
+						map[string]any{"id": "topic-1", "assistantId": "default"},
+						map[string]any{"id": "topic-2", "assistantId": "default"},
+					},
+				},
+				map[string]any{
+					"id":   "assistant-special",
+					"name": "Special",
+					"topics": []any{
+						// Cherry data may carry a stale topic.assistantId. Owner assistant should win.
+						map[string]any{"id": "topic-3", "assistantId": "default"},
+					},
+				},
+			},
+		},
+		"settings": map[string]any{},
+		"llm":      map[string]any{},
+	}
+	persistRaw := map[string]any{}
+	for k, v := range persist {
+		persistRaw[k] = util.MustJSON(v)
+	}
+
+	data := map[string]any{
+		"time":    time.Now().UnixMilli(),
+		"version": 5,
+		"localStorage": map[string]any{
+			"persist:cherry-studio": util.MustJSON(persistRaw),
+		},
+		"indexedDB": map[string]any{
+			"topics": []any{
+				map[string]any{
+					"id": "topic-1",
+					"messages": []any{
+						map[string]any{
+							"id":          "msg-1",
+							"role":        "user",
+							"assistantId": "default",
+							"createdAt":   time.Now().UTC().Format(time.RFC3339),
+							"blocks":      []any{"block-1"},
+						},
+					},
+				},
+				map[string]any{
+					"id": "topic-2",
+					"messages": []any{
+						map[string]any{
+							"id":          "msg-2",
+							"role":        "user",
+							"assistantId": "default",
+							"createdAt":   time.Now().UTC().Format(time.RFC3339),
+							"blocks":      []any{"block-2"},
+						},
+					},
+				},
+				map[string]any{
+					"id": "topic-3",
+					"messages": []any{
+						map[string]any{
+							"id":          "msg-3",
+							"role":        "user",
+							"assistantId": "assistant-special",
+							"createdAt":   time.Now().UTC().Format(time.RFC3339),
+							"blocks":      []any{"block-3"},
+						},
+					},
+				},
+			},
+			"message_blocks": []any{
+				map[string]any{
+					"id":        "block-1",
+					"messageId": "msg-1",
+					"type":      "main_text",
+					"content":   "Topic 1",
+				},
+				map[string]any{
+					"id":        "block-2",
+					"messageId": "msg-2",
+					"type":      "main_text",
+					"content":   "Topic 2",
+				},
+				map[string]any{
+					"id":        "block-3",
+					"messageId": "msg-3",
+					"type":      "main_text",
+					"content":   "Topic 3",
+				},
+			},
+			"files": []any{},
+		},
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "data.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	zipPath := filepath.Join(t.TempDir(), "sample_cherry_assistant_topics.zip")
+	zipDir(t, dataDir, zipPath)
+	return zipPath
+}
+
 func zipDir(t *testing.T, dir, outZip string) {
 	t.Helper()
 	paths, err := util.ListFiles(dir)
@@ -398,6 +564,15 @@ func assertZipHasEntries(t *testing.T, zipPath string, entries ...string) {
 
 func containsString(s, needle string) bool {
 	return len(s) >= len(needle) && (s == needle || (len(s) > 0 && (indexOf(s, needle) >= 0)))
+}
+
+func containsCount(m map[string]int, target int) bool {
+	for _, cnt := range m {
+		if cnt == target {
+			return true
+		}
+	}
+	return false
 }
 
 func indexOf(s, needle string) int {
