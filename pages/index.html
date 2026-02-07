@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cherrikka | GitHub Pages</title>
+    <meta
+      name="description"
+      content="Cherrikka：Cherry Studio 与 RikkaHub 备份互转工具。GitHub Pages 基础介绍与上手说明。"
+    />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body data-theme="dark">
+    <main class="shell">
+      <header class="hero panel">
+        <div class="brand">
+          <img class="logo" src="./favicon.svg" alt="Cherrikka Logo" />
+          <div class="brand-copy">
+            <h1>CHERRIKKA</h1>
+            <p>Cherry Studio ↔ RikkaHub 备份互转</p>
+          </div>
+        </div>
+        <div class="theme-box">
+          <span>主题</span>
+          <div class="theme-switch" role="group" aria-label="Theme switch">
+            <button type="button" class="theme-btn" data-theme-target="dark">黑底白字</button>
+            <button type="button" class="theme-btn" data-theme-target="light">白底黑字</button>
+          </div>
+        </div>
+      </header>
+
+      <section class="panel">
+        <h2>快速入口</h2>
+        <p>
+          在线版本：
+          <a href="https://uwp.de5.net" target="_blank" rel="noreferrer">https://uwp.de5.net</a>
+        </p>
+        <p>
+          仓库地址：
+          <a href="https://github.com/jacob-ayang/Cherrikka" target="_blank" rel="noreferrer">jacob-ayang/Cherrikka</a>
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2>上手说明（前端）</h2>
+        <ol>
+          <li>上传备份 ZIP。</li>
+          <li>选择源格式（auto/cherry/rikka）。</li>
+          <li>点击 Convert，下载转换结果。</li>
+        </ol>
+      </section>
+
+      <section class="panel">
+        <h2>Fork 自部署（Vercel / Pages）</h2>
+        <ol>
+          <li>先 Fork 本项目到你自己的 GitHub 账号。</li>
+          <li>在 Vercel 里导入仓库并完成部署。</li>
+          <li>或者启用 GitHub Pages 发布本目录静态页。</li>
+        </ol>
+        <p>
+          <a
+            class="cta"
+            href="https://vercel.com/new/clone?repository-url=https://github.com/jacob-ayang/Cherrikka&project-name=cherrikka&repository-name=Cherrikka"
+            target="_blank"
+            rel="noreferrer"
+            >Deploy with Vercel</a
+          >
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2>CLI 快速命令</h2>
+        <pre><code>go build -o cherrikka ./cmd/cherrikka
+./cherrikka convert \
+  --input input.zip \
+  --output output.zip \
+  --from auto \
+  --to rikka</code></pre>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
