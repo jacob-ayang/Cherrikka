@@ -27,6 +27,16 @@ Cherrikka 用于在 `Cherry Studio` 与 `RikkaHub` 的备份 ZIP 之间互转。
 3. CLI 稳定链路：支持 `inspect / validate / convert / serve`。
 4. Sidecar 保真：输出包含 `cherrikka/manifest.json` 与 `cherrikka/raw/source.zip`。
 
+## 自部署（Fork + Vercel）
+
+你也可以 `Fork` 本项目后，部署到 Vercel、Netlify、Cloudflare Pages 等静态平台。
+
+<div align="center">
+  <a href="https://vercel.com/new/clone?repository-url=https://github.com/jacob-ayang/Cherrikka&project-name=cherrikka&repository-name=Cherrikka">
+    <img src="https://vercel.com/button" alt="Deploy with Vercel" />
+  </a>
+</div>
+
 ## 前端使用（推荐）
 
 ### 在线直接使用
