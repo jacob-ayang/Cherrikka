@@ -16,10 +16,24 @@ export async function readZipBlob(input: Blob): Promise<Map<string, Uint8Array>>
 }
 
 export async function writeZipBlob(entries: Map<string, Uint8Array>): Promise<Blob> {
-  const writer = new ZipWriter(new BlobWriter('application/zip'));
+  const writer = new ZipWriter(new BlobWriter('application/zip'), {
+    // Match Go archive/zip compatibility profile as closely as possible.
+    msDosCompatible: true,
+    versionMadeBy: 20,
+    // zip.js adds PKWARE NTFS extra fields when extended timestamps are on;
+    // disabling avoids Android importer edge cases and aligns with CLI flags.
+    extendedTimestamp: false,
+    useUnicodeFileNames: false,
+    keepOrder: true,
+  });
   const names = [...entries.keys()].sort();
   for (const name of names) {
-    await writer.add(name, new Uint8ArrayReader(entries.get(name) ?? new Uint8Array()));
+    await writer.add(name, new Uint8ArrayReader(entries.get(name) ?? new Uint8Array()), {
+      msDosCompatible: true,
+      versionMadeBy: 20,
+      extendedTimestamp: false,
+      useUnicodeFileNames: false,
+    });
   }
   return writer.close();
 }
