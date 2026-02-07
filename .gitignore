@@ -1,0 +1,13 @@
+# Local tooling artifacts
+.waylog/
+
+# Local build binaries
+/cherrikka
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# General noise
+.DS_Store
+*.log
