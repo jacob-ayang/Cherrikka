@@ -13,12 +13,14 @@ import {
   asArray,
   asMap,
   asString,
+  cloneAny,
   dedupeStrings,
   isoNow,
   pickFirstString,
 } from '../util/common';
 import { extFromFileName, inferLogicalType, isSafeStem } from '../util/file';
 import { sha256Hex } from '../util/hash';
+import { marshalGoJSON } from '../util/go_json';
 import { newId } from '../util/id';
 import { redactAny } from '../util/redact';
 import {
@@ -67,14 +69,65 @@ export async function validateRikkaArchive(entries: ArchiveEntries): Promise<{ e
   let db: Database | null = null;
   try {
     db = await openDatabase(dbBytes);
-    const managed = new Set<string>();
-    for (const row of queryRows(db, 'SELECT relative_path FROM managed_files')) {
-      const rel = asString(row.relative_path);
-      if (!rel) continue;
-      managed.add(rel);
-      if (!entries.has(rel)) {
-        errors.push(`managed_files payload missing: ${rel}`);
+    const settings = readJson<Record<string, unknown>>(entries, 'settings.json') ?? {};
+    const validAssistantIds = new Set<string>();
+    const enabledModelIds = new Set<string>();
+    for (const providerValue of asArray(settings.providers)) {
+      const provider = asMap(providerValue);
+      const providerId = asString(provider.id);
+      const enabled = asBool(provider.enabled) ?? true;
+      const models = asArray(provider.models);
+      if (enabled && models.length === 0) {
+        errors.push(`enabled provider has no models: ${providerId}`);
       }
+      for (const modelValue of models) {
+        const model = asMap(modelValue);
+        const modelId = pickFirstString(model.id, model.modelId);
+        if (!modelId) {
+          continue;
+        }
+        if (enabled) {
+          enabledModelIds.add(modelId);
+        }
+      }
+    }
+
+    const checkModelRef = (field: string, modelId: string): void => {
+      const normalized = modelId.trim();
+      if (!normalized) {
+        return;
+      }
+      if (!enabledModelIds.has(normalized)) {
+        errors.push(`${field} not found in enabled providers: ${normalized}`);
+      }
+    };
+
+    for (const key of ['chatModelId', 'titleModelId', 'translateModeId', 'suggestionModelId', 'imageGenerationModelId']) {
+      checkModelRef(`settings.${key}`, asString(settings[key]));
+    }
+
+    for (const assistantValue of asArray(settings.assistants)) {
+      const assistant = asMap(assistantValue);
+      const assistantId = asString(assistant.id).trim();
+      if (assistantId) {
+        validAssistantIds.add(assistantId);
+      }
+      checkModelRef('assistant.chatModelId', asString(assistant.chatModelId));
+    }
+
+    const hasManagedTable = tableExists(db, 'managed_files');
+    const managed = new Set<string>();
+    if (hasManagedTable) {
+      for (const row of queryRows(db, 'SELECT relative_path FROM managed_files')) {
+        const rel = asString(row.relative_path);
+        if (!rel) continue;
+        managed.add(rel);
+        if (!entries.has(rel)) {
+          errors.push(`managed_files payload missing: ${rel}`);
+        }
+      }
+    } else {
+      warnings.push('managed_files table missing; skipping managed file index');
     }
 
     for (const row of queryRows(db, 'SELECT messages FROM message_node')) {
@@ -95,9 +148,25 @@ export async function validateRikkaArchive(entries: ArchiveEntries): Promise<{ e
           const fileName = fileNameFromUrl(url);
           if (!fileName) continue;
           const rel = `upload/${fileName}`;
-          if (!managed.has(rel)) {
-            errors.push(`message_node file url has no managed_files entry: ${rel}`);
+          if (hasManagedTable) {
+            if (!managed.has(rel)) {
+              errors.push(`message_node file url has no managed_files entry: ${rel}`);
+            }
+            continue;
           }
+          if (!entries.has(rel)) {
+            errors.push(`message_node file url payload missing: ${rel}`);
+          }
+        }
+      }
+    }
+
+    if (validAssistantIds.size > 0) {
+      for (const row of queryRows(db, 'SELECT DISTINCT assistant_id FROM ConversationEntity')) {
+        const assistantId = asString(row.assistant_id).trim();
+        if (!assistantId) continue;
+        if (!validAssistantIds.has(assistantId)) {
+          errors.push(`conversation assistant_id missing in settings.assistants: ${assistantId}`);
         }
       }
     }
@@ -128,6 +197,14 @@ export async function parseRikkaArchive(entries: ArchiveEntries): Promise<Backup
     secrets: {},
     warnings: [],
   };
+  if (hasFile(entries, 'cherrikka/manifest.json') && hasFile(entries, 'cherrikka/raw/source.zip')) {
+    ir.opaque['interop.sidecar.available'] = true;
+  }
+  const isolatedUnsupported = extractRikkaUnsupportedSettings(settings);
+  if (Object.keys(isolatedUnsupported).length > 0) {
+    ir.opaque['interop.rikka.unsupported'] = isolatedUnsupported;
+    ir.warnings.push('unsupported-isolated:rikka.settings');
+  }
 
   const dbBytes = entries.get('rikka_hub.db');
   if (!dbBytes) {
@@ -143,44 +220,49 @@ export async function parseRikkaArchive(entries: ArchiveEntries): Promise<Backup
 
   const db = await openDatabase(dbBytes);
   try {
-    for (const row of queryRows(db, 'SELECT id, folder, relative_path, display_name, mime_type, size_bytes, created_at, updated_at FROM managed_files')) {
-      const managedId = row.id;
-      const relPath = asString(row.relative_path);
-      if (!relPath) {
-        continue;
+    const hasManagedTable = tableExists(db, 'managed_files');
+    if (hasManagedTable) {
+      for (const row of queryRows(db, 'SELECT id, folder, relative_path, display_name, mime_type, size_bytes, created_at, updated_at FROM managed_files')) {
+        const managedId = row.id;
+        const relPath = asString(row.relative_path);
+        if (!relPath) {
+          continue;
+        }
+        const displayName = pickFirstString(row.display_name, relPath.split('/').at(-1));
+        const bytes = entries.get(relPath);
+        const ext = extFromFileName(displayName);
+        const file: IRFile = {
+          id: `managed:${String(managedId ?? newId())}`,
+          name: displayName,
+          relativeSrc: relPath,
+          bytes: bytes ? new Uint8Array(bytes) : undefined,
+          size: numberOrUndefined(row.size_bytes) ?? bytes?.byteLength,
+          mimeType: asString(row.mime_type),
+          ext,
+          createdAt: millisToIso(row.created_at),
+          updatedAt: millisToIso(row.updated_at),
+          logicalType: inferLogicalType(asString(row.mime_type), ext),
+          missing: !bytes,
+          metadata: {
+            managed_id: managedId,
+            folder: asString(row.folder),
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            'rikka.relative_path': relPath,
+            'rikka.display_name': displayName,
+            'rikka.original_mime': asString(row.mime_type),
+            'rikka.original_bytes': numberOrUndefined(row.size_bytes),
+          },
+        };
+        if (bytes) {
+          file.hashSha256 = await sha256Hex(bytes);
+        } else {
+          fileWarnings.push(`missing managed file payload: ${relPath}`);
+        }
+        filesByRel.set(relPath, file);
       }
-      const displayName = pickFirstString(row.display_name, relPath.split('/').at(-1));
-      const bytes = entries.get(relPath);
-      const ext = extFromFileName(displayName);
-      const file: IRFile = {
-        id: `managed:${String(managedId ?? newId())}`,
-        name: displayName,
-        relativeSrc: relPath,
-        bytes: bytes ? new Uint8Array(bytes) : undefined,
-        size: numberOrUndefined(row.size_bytes) ?? bytes?.byteLength,
-        mimeType: asString(row.mime_type),
-        ext,
-        createdAt: millisToIso(row.created_at),
-        updatedAt: millisToIso(row.updated_at),
-        logicalType: inferLogicalType(asString(row.mime_type), ext),
-        missing: !bytes,
-        metadata: {
-          managed_id: managedId,
-          folder: asString(row.folder),
-          created_at: row.created_at,
-          updated_at: row.updated_at,
-          'rikka.relative_path': relPath,
-          'rikka.display_name': displayName,
-          'rikka.original_mime': asString(row.mime_type),
-          'rikka.original_bytes': numberOrUndefined(row.size_bytes),
-        },
-      };
-      if (bytes) {
-        file.hashSha256 = await sha256Hex(bytes);
-      } else {
-        fileWarnings.push(`missing managed file payload: ${relPath}`);
-      }
-      filesByRel.set(relPath, file);
+    } else {
+      fileWarnings.push('managed_files table missing; skipping managed file index');
     }
 
     for (const relPath of listByPrefix(entries, 'upload')) {
@@ -285,10 +367,11 @@ export async function parseRikkaArchive(entries: ArchiveEntries): Promise<Backup
   const assistants = asArray(settings.assistants);
   for (const rawValue of assistants) {
     const assistant = asMap(rawValue);
+    const assistantId = rawString(assistant.id);
     ir.assistants.push({
-      id: pickFirstString(assistant.id, newId()),
-      name: pickFirstString(assistant.name),
-      prompt: pickFirstString(assistant.systemPrompt),
+      id: assistantId || newId(),
+      name: rawString(assistant.name),
+      prompt: rawString(assistant.systemPrompt),
       description: '',
       model: {
         chatModelId: assistant.chatModelId,
@@ -425,12 +508,12 @@ function parseRikkaPart(raw: Record<string, unknown>, filesByRel: Map<string, IR
 
   if (Object.prototype.hasOwnProperty.call(raw, 'text')) {
     part.type = 'text';
-    part.content = pickFirstString(raw.text);
+    part.content = rawString(raw.text);
     return part;
   }
   if (Object.prototype.hasOwnProperty.call(raw, 'reasoning')) {
     part.type = 'reasoning';
-    part.content = pickFirstString(raw.reasoning);
+    part.content = rawString(raw.reasoning);
     return part;
   }
   if (
@@ -439,16 +522,16 @@ function parseRikkaPart(raw: Record<string, unknown>, filesByRel: Map<string, IR
     && Object.prototype.hasOwnProperty.call(raw, 'input')
   ) {
     part.type = 'tool';
-    part.toolCallId = pickFirstString(raw.toolCallId);
-    part.name = pickFirstString(raw.toolName);
-    part.input = pickFirstString(raw.input);
+    part.toolCallId = rawString(raw.toolCallId);
+    part.name = rawString(raw.toolName);
+    part.input = rawString(raw.input);
     part.output = [];
     for (const outputPartRaw of asArray(raw.output)) {
       const outputPart = asMap(outputPartRaw);
       if (Object.prototype.hasOwnProperty.call(outputPart, 'text')) {
         part.output.push({
           type: 'text',
-          content: pickFirstString(outputPart.text),
+          content: rawString(outputPart.text),
         });
       }
     }
@@ -457,14 +540,14 @@ function parseRikkaPart(raw: Record<string, unknown>, filesByRel: Map<string, IR
 
   if (Object.prototype.hasOwnProperty.call(raw, 'fileName') && Object.prototype.hasOwnProperty.call(raw, 'url')) {
     part.type = 'document';
-    part.name = pickFirstString(raw.fileName);
-    part.mimeType = pickFirstString(raw.mime);
-    mapPartUrlFile(part, pickFirstString(raw.url), filesByRel);
+    part.name = rawString(raw.fileName);
+    part.mimeType = rawString(raw.mime);
+    mapPartUrlFile(part, rawString(raw.url), filesByRel);
     return part;
   }
 
   if (Object.prototype.hasOwnProperty.call(raw, 'url')) {
-    const url = pickFirstString(raw.url);
+    const url = rawString(raw.url);
     part.type = inferMediaType(url, typeString);
     mapPartUrlFile(part, url, filesByRel);
     return part;
@@ -602,7 +685,7 @@ function writeConversations(
       const serializedMessage = rikkaMessageFromIR(message, filePathById, flattenToolCalls);
       db.run(
         'INSERT INTO message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)',
-        [nodeId, convId, index, JSON.stringify([serializedMessage]), 0],
+        [nodeId, convId, index, marshalGoJSON([serializedMessage]), 0],
       );
       idMap[`message:${message.id}`] = pickFirstString(serializedMessage.id);
     });
@@ -877,7 +960,7 @@ function millisToIso(value: unknown): string {
   if (millis === undefined) {
     return isoNow();
   }
-  return new Date(millis).toISOString();
+  return new Date(millis).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 function numberOrZero(value: unknown): number {
@@ -900,6 +983,61 @@ function numberOrUndefined(value: unknown): number | undefined {
     }
   }
   return undefined;
+}
+
+function extractRikkaUnsupportedSettings(settings: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of ['modeInjections', 'lorebooks', 'memoryEntities', 'memories']) {
+    if (Object.prototype.hasOwnProperty.call(settings, key) && isMeaningfulUnsupported(settings[key])) {
+      out[key] = cloneAny(settings[key]);
+    }
+  }
+
+  const assistantFields = ['modeInjectionIds', 'lorebookIds', 'enableMemory', 'useGlobalMemory', 'regexes', 'localTools'];
+  const assistants: Record<string, unknown>[] = [];
+  for (const assistantValue of asArray(settings.assistants)) {
+    const assistant = asMap(assistantValue);
+    const entry: Record<string, unknown> = {};
+    const id = asString(assistant.id);
+    const name = asString(assistant.name);
+    if (id) {
+      entry.id = id;
+    }
+    if (name) {
+      entry.name = name;
+    }
+    for (const field of assistantFields) {
+      if (Object.prototype.hasOwnProperty.call(assistant, field) && isMeaningfulUnsupported(assistant[field])) {
+        entry[field] = cloneAny(assistant[field]);
+      }
+    }
+    if (Object.keys(entry).length > 0) {
+      assistants.push(entry);
+    }
+  }
+  if (assistants.length > 0) {
+    out.assistants = assistants;
+  }
+  return out;
+}
+
+function isMeaningfulUnsupported(value: unknown): boolean {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === 'string') {
+    return value.trim() !== '';
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === 'object') {
+    return Object.keys(value as Record<string, unknown>).length > 0;
+  }
+  return true;
 }
 
 function createAssistantResolver(settings: Record<string, unknown>): (candidate: string) => string {
@@ -952,6 +1090,10 @@ function fileNameFromUrl(url: string): string {
   return base;
 }
 
+function rawString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
 function toErr(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
@@ -968,6 +1110,15 @@ function queryRows(db: Database, sql: string, params: unknown[] = []): Array<Rec
     statement.free();
   }
   return rows;
+}
+
+function tableExists(db: Database, tableName: string): boolean {
+  const rows = queryRows(
+    db,
+    `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1`,
+    [tableName],
+  );
+  return rows.length > 0;
 }
 
 async function resolveIdentityHash(entries: ArchiveEntries): Promise<string> {

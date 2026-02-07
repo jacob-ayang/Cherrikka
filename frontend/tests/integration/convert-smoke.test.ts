@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { writeZipBlob, readZipBlob, writeJson } from '../../src/core/backup/archive';
-import { convert } from '../../src/core/service';
+import { writeZipBlob, readZipBlob, writeJson } from '../../src/engine/backup/archive';
+import { convert } from '../../src/engine/service';
 import { openDatabase } from '../../src/vendor/sql';
 
 describe('convert smoke', () => {

@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { BackupIR } from '../../src/core/ir/types';
+import type { BackupIR } from '../../src/engine/ir/types';
 import {
+  buildCherryPersistSlicesFromIR,
   buildRikkaSettingsFromIR,
   normalizeFromCherryConfig,
   normalizeFromRikkaConfig,
-} from '../../src/core/mapping/settings';
+} from '../../src/engine/mapping/settings';
 
 describe('settings mapping', () => {
   it('normalizes cherry providers to canonical types', () => {
@@ -308,5 +309,98 @@ describe('settings mapping', () => {
     expect(assistants[0].contextMessageSize).toBe(16);
     expect(assistants[0].streamOutput).toBe(true);
     expect(assistants[0].maxTokens).toBe(1024);
+  });
+
+  it('builds cherry model objects from rikka provider modelId aliases', () => {
+    const [normalized] = normalizeFromRikkaConfig({
+      'rikka.settings': {
+        providers: [
+          {
+            id: 'p-openai',
+            type: 'openai',
+            models: [
+              {
+                id: 'af42d0d8-4aa3-4fca-8ef9-d8a595262301',
+                modelId: 'gpt-4o-mini',
+                displayName: 'GPT-4o Mini',
+              },
+            ],
+          },
+        ],
+        chatModelId: 'af42d0d8-4aa3-4fca-8ef9-d8a595262301',
+      },
+    });
+
+    const ir: BackupIR = {
+      sourceApp: 'rikkahub',
+      sourceFormat: 'rikka',
+      createdAt: new Date().toISOString(),
+      assistants: [],
+      conversations: [],
+      files: [],
+      config: {},
+      settings: normalized,
+      opaque: {},
+      secrets: {},
+      warnings: [],
+    };
+
+    const [persist] = buildCherryPersistSlicesFromIR(ir, {}, { assistants: [], defaultAssistant: {} });
+    const llm = persist.llm as Record<string, unknown>;
+    const providers = llm.providers as Array<Record<string, unknown>>;
+    const models = providers[0].models as Array<Record<string, unknown>>;
+    expect(models[0].id).toBe('gpt-4o-mini');
+    expect(models[0].provider).toBe('p-openai');
+    expect((llm.defaultModel as Record<string, unknown>).id).toBe('gpt-4o-mini');
+  });
+
+  it('applies sidecar rehydrate overlay for rikka settings', () => {
+    const ir: BackupIR = {
+      sourceApp: 'cherry-studio',
+      sourceFormat: 'cherry',
+      createdAt: new Date().toISOString(),
+      assistants: [],
+      conversations: [],
+      files: [],
+      config: {
+        'rehydrate.rikka.settings': {
+          modeInjections: [{ id: 'mi-1' }],
+          providers: [
+            {
+              id: '7433b36e-d4f3-4400-8776-1d1de8520be5',
+              type: 'openai',
+              name: 'OpenAI',
+              enabled: true,
+              models: [
+                {
+                  id: '77de7fdb-88c4-4b60-9d57-76244cec632e',
+                  modelId: 'gpt-4o-mini',
+                  displayName: 'GPT-4o Mini',
+                },
+              ],
+            },
+          ],
+          assistants: [
+            {
+              id: '99b076c9-4f40-4fb2-9f55-1de4cbf95e2b',
+              name: 'A1',
+              chatModelId: '77de7fdb-88c4-4b60-9d57-76244cec632e',
+            },
+          ],
+          assistantId: '99b076c9-4f40-4fb2-9f55-1de4cbf95e2b',
+        },
+      },
+      settings: {
+        'core.providers': [],
+        'core.assistants': [],
+      },
+      opaque: {},
+      secrets: {},
+      warnings: [],
+    };
+
+    const [settings, warnings] = buildRikkaSettingsFromIR(ir, {});
+    expect(settings.modeInjections).toBeTruthy();
+    expect(warnings).toContain('sidecar-rehydrate:rikka.settings');
   });
 });

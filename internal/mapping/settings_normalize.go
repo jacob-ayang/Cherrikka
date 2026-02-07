@@ -158,6 +158,15 @@ func mergeMissing(dst, src map[string]any) {
 	}
 }
 
+func mergeOverlay(dst, src map[string]any) {
+	if src == nil {
+		return
+	}
+	for k, v := range src {
+		dst[k] = cloneAny(v)
+	}
+}
+
 func appendUnique(list []string, items ...string) []string {
 	set := make(map[string]struct{}, len(list))
 	for _, v := range list {

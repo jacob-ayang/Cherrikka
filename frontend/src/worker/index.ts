@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
-import { convert, inspect, validate } from '../core/service';
-import type { ConvertPayload, InspectPayload, ValidatePayload, WorkerRequestEnvelope, WorkerResponseEnvelope } from './protocol';
+import type { WorkerRequestEnvelope, WorkerResponseEnvelope } from './protocol';
+import { runTask } from './tasks';
 
 const scope: DedicatedWorkerGlobalScope = self as DedicatedWorkerGlobalScope;
 
@@ -25,43 +25,13 @@ scope.onmessage = async (event: MessageEvent<WorkerRequestEnvelope>) => {
   };
 
   try {
-    if (request.command === 'inspect') {
-      const payload = request.payload as InspectPayload;
-      const result = await inspect(payload.file, (p) => pushProgress(p.stage, p.progress, p.message ?? ''));
-      scope.postMessage({
-        requestId: request.requestId,
-        ok: true,
-        result,
-      } satisfies WorkerResponseEnvelope);
-      return;
-    }
-
-    if (request.command === 'validate') {
-      const payload = request.payload as ValidatePayload;
-      const result = await validate(payload.file, (p) => pushProgress(p.stage, p.progress, p.message ?? ''));
-      scope.postMessage({
-        requestId: request.requestId,
-        ok: true,
-        result,
-      } satisfies WorkerResponseEnvelope);
-      return;
-    }
-
-    if (request.command === 'convert') {
-      const payload = request.payload as ConvertPayload;
-      const result = await convert(payload.request, (p) => pushProgress(p.stage, p.progress, p.message ?? ''));
-      scope.postMessage({
-        requestId: request.requestId,
-        ok: true,
-        result,
-      } satisfies WorkerResponseEnvelope);
-      return;
-    }
-
+    const result = await runTask(request.command, request.payload, (p) => {
+      pushProgress(p.stage, p.progress, p.message ?? '');
+    });
     scope.postMessage({
       requestId: request.requestId,
-      ok: false,
-      error: `unsupported command: ${request.command}`,
+      ok: true,
+      result,
     } satisfies WorkerResponseEnvelope);
   } catch (error) {
     scope.postMessage({

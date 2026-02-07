@@ -1,4 +1,4 @@
-import type { ConvertRequest, ConvertResult, InspectResult, ProgressEvent, ValidateResult } from '../core/ir/types';
+import type { ConvertRequest, ConvertResult, InspectResult, ProgressEvent, ValidateResult } from '../engine/ir/types';
 
 export type WorkerCommand = 'inspect' | 'validate' | 'convert';
 

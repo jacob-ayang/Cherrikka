@@ -28,6 +28,10 @@ func BuildRikkaSettingsFromIR(in *ir.BackupIR, base map[string]any) (map[string]
 		norm, ws = normalizeFromSource(in)
 		warnings = appendUnique(warnings, ws...)
 	}
+	if rehydrate := asMap(in.Config["rehydrate.rikka.settings"]); len(rehydrate) > 0 {
+		mergeOverlay(dst, rehydrate)
+		warnings = appendUnique(warnings, "sidecar-rehydrate:rikka.settings")
+	}
 
 	providerList, modelAlias := buildRikkaProviders(asSlice(norm["core.providers"]), &warnings)
 	if len(providerList) > 0 {
@@ -221,6 +225,10 @@ func buildRikkaProviders(coreProviders []any, warnings *[]string) ([]any, map[st
 			normModels = append(normModels, model)
 		}
 		provider["models"] = normModels
+		if len(normModels) == 0 {
+			provider["enabled"] = false
+			*warnings = appendUnique(*warnings, "provider-invalid-disabled:"+pickFirstString(provider["name"], providerID)+":no-models")
+		}
 
 		out = append(out, provider)
 	}
@@ -361,11 +369,17 @@ func enforceRikkaConsistency(settings map[string]any) []string {
 
 	providers := asSlice(settings["providers"])
 	modelIDs := map[string]struct{}{}
+	enabledModelIDs := map[string]struct{}{}
 	firstModelID := ""
+	firstEnabledModelID := ""
 	for pi, pItem := range providers {
 		pm := asMap(pItem)
 		providerSeed := pickFirstString(pm["id"], pm["name"], util.NewUUID())
 		pm["id"] = ensureUUID(pickFirstString(pm["id"]), "provider:consistency:"+providerSeed)
+		enabled := true
+		if b, ok := coerceBool(pm["enabled"]); ok {
+			enabled = b
+		}
 
 		models := asSlice(pm["models"])
 		for mi, mItem := range models {
@@ -386,13 +400,31 @@ func enforceRikkaConsistency(settings map[string]any) []string {
 				if firstModelID == "" {
 					firstModelID = id
 				}
+				if enabled {
+					enabledModelIDs[id] = struct{}{}
+					if firstEnabledModelID == "" {
+						firstEnabledModelID = id
+					}
+				}
 			}
 			models[mi] = mm
 		}
+		if len(models) == 0 && enabled {
+			enabled = false
+			warnings = appendUnique(warnings, "provider-invalid-disabled:"+pickFirstString(pm["name"], pm["id"])+":no-models")
+		}
+		pm["enabled"] = enabled
 		pm["models"] = models
 		providers[pi] = pm
 	}
 	settings["providers"] = providers
+
+	activeModelIDs := modelIDs
+	activeFirstModelID := firstModelID
+	if len(enabledModelIDs) > 0 {
+		activeModelIDs = enabledModelIDs
+		activeFirstModelID = firstEnabledModelID
+	}
 
 	assistants := asSlice(settings["assistants"])
 	assistantIDs := map[string]struct{}{}
@@ -406,15 +438,15 @@ func enforceRikkaConsistency(settings map[string]any) []string {
 			am["name"] = "Imported Assistant"
 		}
 		if chatModel := pickFirstString(am["chatModelId"]); chatModel != "" {
-			if _, ok := modelIDs[chatModel]; !ok {
-				if firstModelID != "" {
-					am["chatModelId"] = firstModelID
+			if _, ok := activeModelIDs[chatModel]; !ok {
+				if activeFirstModelID != "" {
+					am["chatModelId"] = activeFirstModelID
 				} else {
 					delete(am, "chatModelId")
 				}
 			}
-		} else if firstModelID != "" {
-			am["chatModelId"] = firstModelID
+		} else if activeFirstModelID != "" {
+			am["chatModelId"] = activeFirstModelID
 		}
 		assistants[i] = am
 		assistantIDs[id] = struct{}{}
@@ -439,14 +471,14 @@ func enforceRikkaConsistency(settings map[string]any) []string {
 	for _, key := range []string{"chatModelId", "titleModelId", "translateModeId", "suggestionModelId", "imageGenerationModelId"} {
 		id := pickFirstString(settings[key])
 		if id == "" {
-			if firstModelID != "" {
-				settings[key] = firstModelID
+			if activeFirstModelID != "" {
+				settings[key] = activeFirstModelID
 			}
 			continue
 		}
-		if _, ok := modelIDs[id]; !ok {
-			if firstModelID != "" {
-				settings[key] = firstModelID
+		if _, ok := activeModelIDs[id]; !ok {
+			if activeFirstModelID != "" {
+				settings[key] = activeFirstModelID
 			}
 			warnings = appendUnique(warnings, "selected model "+key+" not found in providers")
 		}

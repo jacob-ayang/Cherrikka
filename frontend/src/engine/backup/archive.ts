@@ -6,6 +6,7 @@ import {
   ZipReader,
   ZipWriter,
 } from '@zip.js/zip.js';
+import { marshalGoJSON } from '../util/go_json';
 
 export type ArchiveEntries = Map<string, Uint8Array>;
 
@@ -87,7 +88,7 @@ export function writeText(entries: ArchiveEntries, path: string, text: string): 
 }
 
 export function writeJson(entries: ArchiveEntries, path: string, value: unknown, pretty = false): void {
-  writeText(entries, path, JSON.stringify(value, null, pretty ? 2 : undefined));
+  writeText(entries, path, marshalGoJSON(value, pretty));
 }
 
 export function listByPrefix(entries: ArchiveEntries, prefix: string): string[] {

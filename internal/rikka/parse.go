@@ -37,23 +37,67 @@ func ValidateExtracted(dir string) error {
 	defer db.Close()
 
 	validAssistantIDs := map[string]struct{}{}
+	modelIDs := map[string]struct{}{}
 	if b, err := os.ReadFile(filepath.Join(dir, "settings.json")); err == nil {
 		settings := map[string]any{}
 		if err := json.Unmarshal(b, &settings); err != nil {
 			issues = append(issues, "parse settings.json failed: "+err.Error())
 		} else {
+			for _, item := range asSlice(settings["providers"]) {
+				provider := asMap(item)
+				providerID := strings.TrimSpace(str(provider["id"]))
+				enabled := true
+				if v, ok := provider["enabled"].(bool); ok {
+					enabled = v
+				}
+				modelCount := 0
+				for _, mItem := range asSlice(provider["models"]) {
+					model := asMap(mItem)
+					modelID := strings.TrimSpace(str(model["id"]))
+					if modelID == "" {
+						modelID = strings.TrimSpace(str(model["modelId"]))
+					}
+					if modelID == "" {
+						continue
+					}
+					modelCount++
+					if enabled {
+						modelIDs[modelID] = struct{}{}
+					}
+				}
+				if enabled && modelCount == 0 {
+					issues = append(issues, "enabled provider has no models: "+providerID)
+				}
+			}
+
+			checkModelRef := func(field, modelID string) {
+				modelID = strings.TrimSpace(modelID)
+				if modelID == "" {
+					return
+				}
+				if _, ok := modelIDs[modelID]; !ok {
+					issues = append(issues, field+" not found in enabled providers: "+modelID)
+				}
+			}
+			for _, key := range []string{"chatModelId", "titleModelId", "translateModeId", "suggestionModelId", "imageGenerationModelId"} {
+				checkModelRef("settings."+key, str(settings[key]))
+			}
+
 			for _, item := range asSlice(settings["assistants"]) {
 				assistant := asMap(item)
 				if id := str(assistant["id"]); id != "" {
 					validAssistantIDs[id] = struct{}{}
 				}
+				checkModelRef("assistant.chatModelId", str(assistant["chatModelId"]))
 			}
 		}
 	}
 
 	managed := map[string]struct{}{}
+	hasManagedIndex := false
 	rows, err := db.Query(`SELECT relative_path FROM managed_files`)
 	if err == nil {
+		hasManagedIndex = true
 		defer rows.Close()
 		for rows.Next() {
 			var rel string
@@ -95,8 +139,12 @@ func ValidateExtracted(dir string) error {
 						continue
 					}
 					rel := filepath.ToSlash(filepath.Join("upload", fileName))
-					if _, ok := managed[rel]; !ok {
-						issues = append(issues, "message_node file url has no managed_files entry: "+rel)
+					if hasManagedIndex {
+						if _, ok := managed[rel]; !ok {
+							issues = append(issues, "message_node file url has no managed_files entry: "+rel)
+						}
+					} else if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(rel))); err != nil {
+						issues = append(issues, "message_node file url payload missing: "+rel)
 					}
 				}
 			}
@@ -142,6 +190,13 @@ func ParseToIR(extractedDir string) (*ir.BackupIR, error) {
 		Settings:     map[string]any{},
 		Opaque:       map[string]any{},
 		Secrets:      map[string]string{},
+	}
+	if sidecarExists(extractedDir) {
+		res.Opaque["interop.sidecar.available"] = true
+	}
+	if isolated := mapping.ExtractRikkaUnsupportedSettings(settings); len(isolated) > 0 {
+		res.Opaque["interop.rikka.unsupported"] = isolated
+		res.Warnings = append(res.Warnings, "unsupported-isolated:rikka.settings")
 	}
 
 	db, err := sql.Open("sqlite", filepath.Join(extractedDir, "rikka_hub.db"))
@@ -194,6 +249,14 @@ func ParseToIR(extractedDir string) (*ir.BackupIR, error) {
 }
 
 func parseManagedFiles(db *sql.DB, extractedDir string, out map[string]ir.IRFile) ([]string, error) {
+	exists, err := tableExists(db, "managed_files")
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return []string{"managed_files table missing; skipping managed file index"}, nil
+	}
+
 	warnings := []string{}
 	rows, err := db.Query(`SELECT id, folder, relative_path, display_name, mime_type, size_bytes, created_at, updated_at FROM managed_files`)
 	if err != nil {
@@ -517,6 +580,18 @@ func inferMediaType(url, typeField string) string {
 	}
 }
 
+func sidecarExists(root string) bool {
+	manifestPath := filepath.Join(root, "cherrikka", "manifest.json")
+	sourcePath := filepath.Join(root, "cherrikka", "raw", "source.zip")
+	if _, err := os.Stat(manifestPath); err != nil {
+		return false
+	}
+	if _, err := os.Stat(sourcePath); err != nil {
+		return false
+	}
+	return true
+}
+
 func sortedFiles(m map[string]ir.IRFile) []ir.IRFile {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -554,4 +629,12 @@ func asSlice(v any) []any {
 func str(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func tableExists(db *sql.DB, tableName string) (bool, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = ?`, tableName).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }

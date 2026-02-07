@@ -7,6 +7,7 @@ import {
   asString,
   cloneAny,
   dedupeStrings,
+  mergeOverlay,
   mergeMissing,
   pickFirstString,
   setIfPresent,
@@ -320,6 +321,11 @@ export function buildRikkaSettingsFromIR(
   }
 
   const normalized = Object.keys(ir.settings).length > 0 ? ir.settings : normalizeFromSource(ir)[0];
+  const rehydrateRikka = asMap(ir.config['rehydrate.rikka.settings']);
+  if (Object.keys(rehydrateRikka).length > 0) {
+    mergeOverlay(settings, rehydrateRikka);
+    warnings.push('sidecar-rehydrate:rikka.settings');
+  }
 
   const modelAlias = new Map<string, string>();
   const providers = buildRikkaProviders(asArray(normalized['core.providers']), warnings, modelAlias);
@@ -411,17 +417,38 @@ export function buildCherryPersistSlicesFromIR(
   const settings = cloneAny(asMap(slices.settings)) as Record<string, unknown>;
   const llm = cloneAny(asMap(slices.llm)) as Record<string, unknown>;
 
-  const models = asMap(normalized['core.models']);
-  for (const key of ['defaultModel', 'quickModel', 'translateModel', 'topicNamingModel']) {
-    if (Object.keys(asMap(models[key])).length > 0) {
-      llm[key] = cloneAny(models[key]);
+  const rehydratePersist = asMap(ir.config['rehydrate.cherry.persistSlices']);
+  if (Object.keys(rehydratePersist).length > 0) {
+    mergeOverlay(settings, asMap(rehydratePersist.settings));
+    mergeOverlay(llm, asMap(rehydratePersist.llm));
+    if (Object.keys(asMap(slices.assistants)).length === 0) {
+      const restoredAssistants = asMap(rehydratePersist.assistants);
+      if (Object.keys(restoredAssistants).length > 0) {
+        slices.assistants = cloneAny(restoredAssistants);
+      }
     }
+    warnings.push('sidecar-rehydrate:cherry.persistSlices');
+  }
+  const rehydrateSettings = asMap(ir.config['rehydrate.cherry.settings']);
+  if (Object.keys(rehydrateSettings).length > 0) {
+    mergeOverlay(settings, rehydrateSettings);
+    warnings.push('sidecar-rehydrate:cherry.settings');
+  }
+  const rehydrateLlm = asMap(ir.config['rehydrate.cherry.llm']);
+  if (Object.keys(rehydrateLlm).length > 0) {
+    mergeOverlay(llm, rehydrateLlm);
+    warnings.push('sidecar-rehydrate:cherry.llm');
   }
 
-  const providers = buildCherryProviders(asArray(normalized['core.providers']), warnings);
+  const models = asMap(normalized['core.models']);
+  const [providers, modelLookup, firstModel] = buildCherryProviders(asArray(normalized['core.providers']), warnings);
   if (providers.length > 0) {
     llm.providers = providers;
   }
+  applyCherrySelection(llm, 'defaultModel', modelLookup, firstModel, warnings, models.defaultModel, models.chatModelId);
+  applyCherrySelection(llm, 'quickModel', modelLookup, firstModel, warnings, models.quickModel, models.suggestionModelId);
+  applyCherrySelection(llm, 'translateModel', modelLookup, firstModel, warnings, models.translateModel, models.translateModeId);
+  applyCherrySelection(llm, 'topicNamingModel', modelLookup, firstModel, warnings, models.topicNamingModel, models.titleModelId);
 
   const ui = asMap(normalized['ui.profile']);
   for (const key of ['userId', 'userName', 'language', 'targetLanguage']) {
@@ -579,6 +606,10 @@ function buildRikkaProviders(
       normalizedModels.push(safeModel);
     }
     mappedProvider.models = normalizedModels;
+    if (normalizedModels.length === 0) {
+      mappedProvider.enabled = false;
+      warnings.push(`provider-invalid-disabled:${pickFirstString(mappedProvider.name, mappedProvider.id)}:no-models`);
+    }
     result.push(mappedProvider);
   }
   return result;
@@ -698,8 +729,13 @@ function buildRikkaAssistants(
   return result;
 }
 
-function buildCherryProviders(coreProviders: unknown[], warnings: string[]): Record<string, unknown>[] {
+function buildCherryProviders(
+  coreProviders: unknown[],
+  warnings: string[],
+): [Record<string, unknown>[], Map<string, Record<string, unknown>>, Record<string, unknown> | null] {
   const result: Record<string, unknown>[] = [];
+  const modelLookup = new Map<string, Record<string, unknown>>();
+  let firstModel: Record<string, unknown> | null = null;
   for (const value of coreProviders) {
     const provider = asMap(value);
     const mappedType = pickFirstString(provider.mappedType);
@@ -710,29 +746,153 @@ function buildCherryProviders(coreProviders: unknown[], warnings: string[]): Rec
       continue;
     }
     const raw = cloneAny(asMap(provider.raw)) as Record<string, unknown>;
-    if (!asString(raw.id)) raw.id = pickFirstString(provider.id, newId());
+    const providerId = pickFirstString(raw.id, provider.id, newId());
+    raw.id = providerId;
     if (!asString(raw.name)) raw.name = pickFirstString(provider.name, mappedType.toUpperCase());
     raw.type = cherryType;
-    if (!Array.isArray(raw.models)) {
+    const normalizedModels: Record<string, unknown>[] = [];
+    for (const modelValue of asArray(raw.models)) {
+      const model = cloneAny(asMap(modelValue)) as Record<string, unknown>;
+      if (Object.keys(model).length === 0) {
+        continue;
+      }
+      const sourceId = pickFirstString(model.id);
+      const modelId = pickFirstString(model.modelId, model.id, model.name, model.displayName, newId());
+      const normalizedModel: Record<string, unknown> = cloneAny(model) as Record<string, unknown>;
+      normalizedModel.id = modelId;
+      normalizedModel.provider = providerId;
+      normalizedModel.name = pickFirstString(model.name, model.displayName, model.modelId, modelId);
+      if (!asString(normalizedModel.group)) {
+        normalizedModel.group = 'default';
+      }
+      if (!asString(normalizedModel.modelId)) {
+        normalizedModel.modelId = modelId;
+      }
+      registerCherryModelAlias(modelLookup, sourceId, normalizedModel);
+      registerCherryModelAlias(modelLookup, asString(normalizedModel.id), normalizedModel);
+      registerCherryModelAlias(modelLookup, asString(normalizedModel.modelId), normalizedModel);
+      registerCherryModelAlias(modelLookup, asString(normalizedModel.name), normalizedModel);
+      registerCherryModelAlias(modelLookup, asString(normalizedModel.displayName), normalizedModel);
+      if (!firstModel) {
+        firstModel = cloneAny(normalizedModel) as Record<string, unknown>;
+      }
+      normalizedModels.push(normalizedModel);
+    }
+    if (normalizedModels.length === 0) {
       raw.models = [];
+      raw.enabled = false;
+      warnings.push(`provider-invalid-disabled:${pickFirstString(raw.name, providerId)}:no-models`);
+    } else {
+      raw.models = normalizedModels;
     }
     if (!asString(raw.apiHost) && asString(raw.baseUrl)) {
       raw.apiHost = raw.baseUrl;
     }
     result.push(raw);
   }
-  return result;
+  return [result, modelLookup, firstModel];
+}
+
+function registerCherryModelAlias(
+  lookup: Map<string, Record<string, unknown>>,
+  key: string,
+  model: Record<string, unknown>,
+): void {
+  const normalized = key.trim();
+  if (!normalized) {
+    return;
+  }
+  if (!lookup.has(normalized)) {
+    lookup.set(normalized, cloneAny(model) as Record<string, unknown>);
+  }
+  const lower = normalized.toLowerCase();
+  if (!lookup.has(lower)) {
+    lookup.set(lower, cloneAny(model) as Record<string, unknown>);
+  }
+}
+
+function resolveCherryModel(
+  candidate: unknown,
+  lookup: Map<string, Record<string, unknown>>,
+): Record<string, unknown> | null {
+  const resolveByString = (value: string): Record<string, unknown> | null => {
+    const normalized = value.trim();
+    if (!normalized) return null;
+    const exact = lookup.get(normalized);
+    if (exact) return cloneAny(exact) as Record<string, unknown>;
+    const lower = lookup.get(normalized.toLowerCase());
+    if (lower) return cloneAny(lower) as Record<string, unknown>;
+    return null;
+  };
+
+  const byString = resolveByString(pickFirstString(candidate));
+  if (byString) {
+    return byString;
+  }
+
+  const raw = asMap(candidate);
+  if (Object.keys(raw).length === 0) {
+    return null;
+  }
+  for (const key of ['id', 'modelId', 'name', 'displayName']) {
+    const resolved = resolveByString(pickFirstString(raw[key]));
+    if (resolved) {
+      return resolved;
+    }
+  }
+
+  const modelId = pickFirstString(raw.modelId, raw.id, raw.name, raw.displayName);
+  if (!modelId) {
+    return null;
+  }
+  const out = cloneAny(raw) as Record<string, unknown>;
+  out.id = modelId;
+  out.name = pickFirstString(raw.name, raw.displayName, modelId);
+  if (!asString(out.group)) {
+    out.group = 'default';
+  }
+  if (!asString(out.modelId)) {
+    out.modelId = modelId;
+  }
+  return out;
+}
+
+function applyCherrySelection(
+  llm: Record<string, unknown>,
+  key: string,
+  lookup: Map<string, Record<string, unknown>>,
+  firstModel: Record<string, unknown> | null,
+  warnings: string[],
+  ...candidates: unknown[]
+): void {
+  for (const candidate of candidates) {
+    const model = resolveCherryModel(candidate, lookup);
+    if (model && Object.keys(model).length > 0) {
+      llm[key] = model;
+      return;
+    }
+  }
+  if (firstModel && Object.keys(firstModel).length > 0) {
+    llm[key] = cloneAny(firstModel);
+    warnings.push(`provider-invalid-disabled:model-selection-fallback:${key}`);
+  }
 }
 
 function enforceRikkaConsistency(settings: Record<string, unknown>): string[] {
   const warnings: string[] = [];
   const providers = asArray(settings.providers).map((value) => asMap(value));
   const modelIds = new Set<string>();
+  const enabledModelIds = new Set<string>();
   let firstModelId = '';
+  let firstEnabledModelId = '';
   const normalizedProviders = providers.map((provider) => {
     const out = cloneAny(provider) as Record<string, unknown>;
     const providerSeed = pickFirstString(out.id, out.name, newId());
     out.id = ensureUuid(asString(out.id), `provider:consistency:${providerSeed}`);
+    let enabled = asBool(out.enabled);
+    if (enabled === undefined) {
+      enabled = true;
+    }
     const normalizedModels = asArray(out.models).map((modelValue) => {
       const model = cloneAny(asMap(modelValue)) as Record<string, unknown>;
       const modelRef = pickFirstString(model.modelId, model.id, model.name, model.displayName, newId());
@@ -744,13 +904,25 @@ function enforceRikkaConsistency(settings: Record<string, unknown>): string[] {
       if (modelId) {
         modelIds.add(modelId);
         if (!firstModelId) firstModelId = modelId;
+        if (enabled) {
+          enabledModelIds.add(modelId);
+          if (!firstEnabledModelId) firstEnabledModelId = modelId;
+        }
       }
       return model;
     });
+    if (normalizedModels.length === 0 && enabled) {
+      enabled = false;
+      warnings.push(`provider-invalid-disabled:${pickFirstString(out.name, out.id)}:no-models`);
+    }
+    out.enabled = enabled;
     out.models = normalizedModels;
     return out;
   });
   settings.providers = normalizedProviders;
+
+  const activeModelIds = enabledModelIds.size > 0 ? enabledModelIds : modelIds;
+  const activeFirstModelId = enabledModelIds.size > 0 ? firstEnabledModelId : firstModelId;
 
   const assistants = asArray(settings.assistants).map((value) => asMap(value));
   const assistantIds = new Set<string>();
@@ -759,14 +931,14 @@ function enforceRikkaConsistency(settings: Record<string, unknown>): string[] {
     const assistantSeed = pickFirstString(out.id, out.name, newId());
     out.id = ensureUuid(asString(out.id), `assistant:consistency:${assistantSeed}`);
     const chatModelId = asString(out.chatModelId);
-    if (chatModelId && !modelIds.has(chatModelId)) {
-      if (firstModelId) {
-        out.chatModelId = firstModelId;
+    if (chatModelId && !activeModelIds.has(chatModelId)) {
+      if (activeFirstModelId) {
+        out.chatModelId = activeFirstModelId;
       } else {
         delete out.chatModelId;
       }
-    } else if (!chatModelId && firstModelId) {
-      out.chatModelId = firstModelId;
+    } else if (!chatModelId && activeFirstModelId) {
+      out.chatModelId = activeFirstModelId;
     }
     assistantIds.add(asString(out.id));
     return out;
@@ -787,13 +959,13 @@ function enforceRikkaConsistency(settings: Record<string, unknown>): string[] {
 
   for (const key of ['chatModelId', 'titleModelId', 'translateModeId', 'suggestionModelId', 'imageGenerationModelId']) {
     const selectedId = asString(settings[key]);
-    if (selectedId && !modelIds.has(selectedId)) {
-      if (firstModelId) {
-        settings[key] = firstModelId;
+    if (selectedId && !activeModelIds.has(selectedId)) {
+      if (activeFirstModelId) {
+        settings[key] = activeFirstModelId;
       }
       warnings.push(`selected model ${key} not found in providers`);
-    } else if (!selectedId && firstModelId) {
-      settings[key] = firstModelId;
+    } else if (!selectedId && activeFirstModelId) {
+      settings[key] = activeFirstModelId;
     }
   }
 

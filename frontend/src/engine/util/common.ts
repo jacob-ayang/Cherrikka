@@ -90,6 +90,13 @@ export function mergeMissing(target: Record<string, unknown>, source: Record<str
   }
 }
 
+export function mergeOverlay(target: Record<string, unknown>, source: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(source)) {
+    target[key] = cloneAny(value);
+  }
+}
+
 export function isoNow(): string {
-  return new Date().toISOString();
+  // Align with Go time.RFC3339 format (second precision, UTC).
+  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 }

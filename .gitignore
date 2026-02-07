@@ -11,3 +11,7 @@ frontend/dist/
 # General noise
 .DS_Store
 *.log
+
+# Local comparison artifacts
+/.compare/
+/.trash/

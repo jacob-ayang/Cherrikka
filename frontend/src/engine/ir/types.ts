@@ -93,6 +93,8 @@ export interface ConfigSummary {
   assistants: number;
   hasWebdav: boolean;
   hasS3: boolean;
+  isolatedConfigItems?: number;
+  rehydrationAvailable?: boolean;
 }
 
 export interface FileSummary {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectFormat } from '../../src/core/backup/format';
+import { detectFormat } from '../../src/engine/backup/format';
 
 describe('detectFormat', () => {
   it('detects cherry backups', () => {

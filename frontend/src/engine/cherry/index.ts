@@ -5,7 +5,6 @@ import {
   listByPrefix,
   readJson,
   writeJson,
-  writeText,
   removeByPrefix,
 } from '../backup/archive';
 import type { BackupIR, IRConversation, IRFile, IRMessage, IRPart } from '../ir/types';
@@ -13,12 +12,14 @@ import {
   asArray,
   asMap,
   asString,
+  cloneAny,
   dedupeStrings,
   isoNow,
   pickFirstString,
 } from '../util/common';
 import { extFromFileName, inferLogicalType, isSafeStem } from '../util/file';
 import { sha256Hex } from '../util/hash';
+import { marshalGoJSON } from '../util/go_json';
 import { newId } from '../util/id';
 import { redactAny } from '../util/redact';
 import { buildCherryPersistSlicesFromIR, normalizeFromCherryConfig } from '../mapping/settings';
@@ -43,6 +44,9 @@ export async function parseCherryArchive(entries: ArchiveEntries): Promise<Backu
     secrets: {},
     warnings: [],
   };
+  if (hasFile(entries, 'cherrikka/manifest.json') && hasFile(entries, 'cherrikka/raw/source.zip')) {
+    ir.opaque['interop.sidecar.available'] = true;
+  }
 
   const blocksById: Record<string, Record<string, unknown>> = {};
   for (const item of asArray(indexedDB.message_blocks)) {
@@ -149,6 +153,11 @@ export async function parseCherryArchive(entries: ArchiveEntries): Promise<Backu
 
   parsePersistSlices(ir, localStorage);
   applyConversationAssistantFallbacks(ir, explicitTopicAssistant, messageAssistantByTopic);
+  const isolatedUnsupported = extractCherryUnsupportedSettings(ir.config);
+  if (Object.keys(isolatedUnsupported).length > 0) {
+    ir.opaque['interop.cherry.unsupported'] = isolatedUnsupported;
+    ir.warnings.push('unsupported-isolated:cherry.settings');
+  }
 
   const unknownTables: Record<string, unknown> = {};
   for (const [table, value] of Object.entries(indexedDB)) {
@@ -221,6 +230,90 @@ export function validateCherryArchive(entries: ArchiveEntries): { errors: string
     }
   }
 
+  const localStorage = asMap(root.localStorage);
+  const persistRaw = asString(localStorage['persist:cherry-studio']);
+  if (persistRaw) {
+    try {
+      const persistSlices = JSON.parse(persistRaw) as Record<string, unknown>;
+      const decoded: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(persistSlices)) {
+        if (typeof value !== 'string') {
+          decoded[key] = value;
+          continue;
+        }
+        try {
+          decoded[key] = JSON.parse(value);
+        } catch {
+          // ignore malformed slice entries; they are handled by runtime fallback.
+        }
+      }
+
+      const llm = asMap(decoded.llm);
+      const providerIds = new Set<string>();
+      const modelIds = new Set<string>();
+      for (const providerValue of asArray(llm.providers)) {
+        const provider = asMap(providerValue);
+        const providerId = asString(provider.id);
+        if (!providerId) {
+          errors.push('llm.providers has provider with empty id');
+          continue;
+        }
+        providerIds.add(providerId);
+        const models = asArray(provider.models);
+        if (models.length === 0) {
+          errors.push(`llm.providers has provider without models: ${providerId}`);
+        }
+        for (const modelValue of models) {
+          const model = asMap(modelValue);
+          const modelId = pickFirstString(model.id, model.modelId);
+          if (!modelId) {
+            errors.push(`llm.providers model missing id: ${providerId}`);
+            continue;
+          }
+          modelIds.add(modelId);
+          const modelAlias = asString(model.modelId);
+          if (modelAlias) {
+            modelIds.add(modelAlias);
+          }
+          const modelProvider = asString(model.provider);
+          if (!modelProvider) {
+            errors.push(`llm.providers model missing provider: ${modelId}`);
+          } else if (!providerIds.has(modelProvider)) {
+            errors.push(`llm.providers model provider not found: ${modelProvider}`);
+          }
+        }
+      }
+
+      for (const key of ['defaultModel', 'quickModel', 'translateModel', 'topicNamingModel']) {
+        const model = asMap(llm[key]);
+        if (Object.keys(model).length === 0) continue;
+        if (modelIds.size === 0) continue;
+        const modelId = pickFirstString(model.id, model.modelId);
+        if (!modelId) {
+          errors.push(`llm.${key} missing model id`);
+          continue;
+        }
+        if (!modelIds.has(modelId)) {
+          errors.push(`llm.${key} not found in llm.providers: ${modelId}`);
+        }
+      }
+
+      const assistantsSlice = asMap(decoded.assistants);
+      for (const assistantValue of asArray(assistantsSlice.assistants)) {
+        const assistant = asMap(assistantValue);
+        const model = asMap(assistant.model);
+        const modelId = pickFirstString(model.id, model.modelId);
+        if (!modelId) continue;
+        if (modelIds.size === 0) continue;
+        if (!modelIds.has(modelId)) {
+          errors.push(`assistant model not found in llm.providers: ${modelId}`);
+        }
+      }
+    } catch (error) {
+      errors.push(`parse persist:cherry-studio failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   return { errors: dedupeStrings(errors), warnings: dedupeStrings(warnings) };
 }
 
@@ -254,12 +347,18 @@ export async function buildCherryArchiveFromIR(
 
   for (const conversation of ir.conversations) {
     const topicId = conversation.id || newId();
-    idMap[`topic:${conversation.id}`] = topicId;
+    const topicKey = `topic:${conversation.id}`;
+    if (!Object.prototype.hasOwnProperty.call(idMap, topicKey)) {
+      idMap[topicKey] = topicId;
+    }
 
     const topicMessages: Record<string, unknown>[] = [];
     for (const message of conversation.messages) {
       const messageId = message.id || newId();
-      idMap[`message:${message.id}`] = messageId;
+      const messageKey = `message:${message.id}`;
+      if (!Object.prototype.hasOwnProperty.call(idMap, messageKey)) {
+        idMap[messageKey] = messageId;
+      }
       const blockIds: string[] = [];
 
       for (const part of message.parts) {
@@ -282,8 +381,6 @@ export async function buildCherryArchiveFromIR(
     topics.push({
       id: topicId,
       messages: topicMessages,
-      name: conversation.title,
-      assistantId: conversation.assistantId,
     });
   }
 
@@ -311,11 +408,7 @@ export async function buildCherryArchiveFromIR(
     nextSlices = redactAny(nextSlices) as Record<string, unknown>;
   }
 
-  const persistRaw: Record<string, string> = {};
-  for (const [key, value] of Object.entries(nextSlices)) {
-    persistRaw[key] = JSON.stringify(value);
-  }
-  localStorage['persist:cherry-studio'] = JSON.stringify(persistRaw);
+  localStorage['persist:cherry-studio'] = encodePersistSlicesForStorage(nextSlices);
 
   const data = {
     ...baseData,
@@ -362,11 +455,12 @@ function parsePersistSlices(ir: BackupIR, localStorage: Record<string, unknown>)
   const assistants = asArray(asMap(decoded.assistants).assistants);
   for (const item of assistants) {
     const assistant = asMap(item);
+    const assistantId = rawString(assistant.id);
     ir.assistants.push({
-      id: pickFirstString(assistant.id, newId()),
-      name: pickFirstString(assistant.name),
-      prompt: pickFirstString(assistant.prompt),
-      description: pickFirstString(assistant.description),
+      id: assistantId || newId(),
+      name: rawString(assistant.name),
+      prompt: rawString(assistant.prompt),
+      description: rawString(assistant.description),
       model: asMap(assistant.model),
       settings: asMap(assistant.settings),
       opaque: {},
@@ -500,19 +594,19 @@ function mapBlockToPart(block: Record<string, unknown>, filesById: Record<string
 
   if (['main_text', 'code', 'translation', 'compact'].includes(blockType)) {
     basePart.type = 'text';
-    basePart.content = pickFirstString(block.content);
+    basePart.content = rawString(block.content);
   } else if (blockType === 'thinking') {
     basePart.type = 'reasoning';
-    basePart.content = pickFirstString(block.content);
+    basePart.content = rawString(block.content);
   } else if (blockType === 'tool') {
     basePart.type = 'tool';
     basePart.name = pickFirstString(block.toolName);
     basePart.toolCallId = pickFirstString(block.toolId);
     if (block.arguments !== undefined) {
-      basePart.input = JSON.stringify(block.arguments);
+      basePart.input = marshalGoJSON(block.arguments);
     }
-    if (asString(block.content)) {
-      basePart.output = [{ type: 'text', content: pickFirstString(block.content) }];
+    if (rawString(block.content) !== '') {
+      basePart.output = [{ type: 'text', content: rawString(block.content) }];
     }
   } else if (blockType === 'image' || blockType === 'video') {
     basePart.type = blockType;
@@ -526,7 +620,8 @@ function mapBlockToPart(block: Record<string, unknown>, filesById: Record<string
     }
   } else {
     basePart.type = 'text';
-    basePart.content = pickFirstString(block.content, `[unsupported cherry block: ${blockType}]`);
+    const content = rawString(block.content);
+    basePart.content = content !== '' ? content : `[unsupported cherry block: ${blockType}]`;
     (basePart.metadata as Record<string, unknown>).raw = block;
   }
 
@@ -584,6 +679,10 @@ async function materializeCherryFiles(
       created_at: fallbackTime(file.createdAt),
       count: 1,
     });
+  }
+
+  if (fileTable.length === 0) {
+    outputEntries.set('Data/Files/.keep', new Uint8Array());
   }
 
   return { fileTable, warnings: dedupeStrings(warnings) };
@@ -730,6 +829,53 @@ function buildAssistantsSlice(
   };
 }
 
+function extractCherryUnsupportedSettings(config: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+
+  const settings = asMap(config['cherry.settings']);
+  const isolatedSettings: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(settings)) {
+    if (key.toLowerCase().includes('memory') && isMeaningfulUnsupported(value)) {
+      isolatedSettings[key] = cloneAny(value);
+    }
+  }
+  if (Object.keys(isolatedSettings).length > 0) {
+    out.settings = isolatedSettings;
+  }
+
+  const persistSlices = asMap(config['cherry.persistSlices']);
+  const isolatedSlices: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(persistSlices)) {
+    if (key.toLowerCase().includes('memory') && isMeaningfulUnsupported(value)) {
+      isolatedSlices[key] = cloneAny(value);
+    }
+  }
+  if (Object.keys(isolatedSlices).length > 0) {
+    out.persistSlices = isolatedSlices;
+  }
+
+  return out;
+}
+
+function isMeaningfulUnsupported(value: unknown): boolean {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === 'string') {
+    return value.trim() !== '';
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === 'object') {
+    return Object.keys(value as Record<string, unknown>).length > 0;
+  }
+  return true;
+}
+
 function defaultPersistSlices(): Record<string, unknown> {
   return {
     settings: {
@@ -746,7 +892,6 @@ function defaultPersistSlices(): Record<string, unknown> {
       },
       quickModel: null,
       translateModel: null,
-      topicNamingModel: null,
     },
     backup: {
       webdavSync: { lastSyncTime: null, syncing: false, lastSyncError: null },
@@ -808,6 +953,18 @@ function cloneTableValue(value: unknown): unknown {
   return value;
 }
 
+function rawString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+export function encodePersistSlicesForStorage(slices: Record<string, unknown>): string {
+  const persistRaw: Record<string, string> = {};
+  for (const [key, value] of Object.entries(slices)) {
+    persistRaw[key] = marshalGoJSON(value);
+  }
+  return marshalGoJSON(persistRaw);
+}
+
 export function seedCherryTemplate(entries: ArchiveEntries): void {
   if (!hasFile(entries, 'data.json')) {
     const skeleton = {
@@ -816,6 +973,6 @@ export function seedCherryTemplate(entries: ArchiveEntries): void {
       localStorage: {},
       indexedDB: {},
     };
-    writeText(entries, 'data.json', JSON.stringify(skeleton));
+    writeJson(entries, 'data.json', skeleton, false);
   }
 }

@@ -36,6 +36,9 @@ func ParseToIR(extractedDir string) (*ir.BackupIR, error) {
 		Opaque:       map[string]any{},
 		Secrets:      map[string]string{},
 	}
+	if sidecarExists(extractedDir) {
+		res.Opaque["interop.sidecar.available"] = true
+	}
 
 	var localStorage map[string]any
 	if raw, ok := root["localStorage"]; ok {
@@ -166,6 +169,10 @@ func ParseToIR(extractedDir string) (*ir.BackupIR, error) {
 		return nil, err
 	}
 	applyConversationAssistantFallbacks(res, explicitTopicAssistant, messageAssistantByTopic)
+	if isolated := mapping.ExtractCherryUnsupportedSettings(res.Config); len(isolated) > 0 {
+		res.Opaque["interop.cherry.unsupported"] = isolated
+		res.Warnings = append(res.Warnings, "unsupported-isolated:cherry.settings")
+	}
 	settings, warnings := mapping.NormalizeFromCherryConfig(res.Config)
 	res.Settings = settings
 	res.Warnings = append(res.Warnings, warnings...)
@@ -669,6 +676,12 @@ func materializeCherryFiles(outputDir string, files []ir.IRFile, idMap map[strin
 			"count":       1,
 		})
 	}
+	if len(table) == 0 {
+		keepPath := filepath.Join(destDir, ".keep")
+		if err := os.WriteFile(keepPath, nil, 0o644); err != nil {
+			return nil, nil, err
+		}
+	}
 	return table, dedupeWarnings(warnings), nil
 }
 
@@ -807,11 +820,15 @@ func buildAssistantsSlice(assistants []ir.IRAssistant, convByAssistant map[strin
 		})
 	}
 	def := arr[0].(map[string]any)
-	def["id"] = "default"
-	def["name"] = "Default"
+	defaultAssistant := map[string]any{}
+	for k, v := range def {
+		defaultAssistant[k] = v
+	}
+	defaultAssistant["id"] = "default"
+	defaultAssistant["name"] = "Default"
 
 	return map[string]any{
-		"defaultAssistant": def,
+		"defaultAssistant": defaultAssistant,
 		"assistants":       arr,
 		"tagsOrder":        []any{},
 		"collapsedTags":    map[string]any{},
@@ -1091,8 +1108,125 @@ func ValidateExtracted(dir string) error {
 			}
 		}
 	}
+
+	localStorage := map[string]any{}
+	if raw, ok := root["localStorage"]; ok {
+		_ = json.Unmarshal(raw, &localStorage)
+	}
+	persistStr := str(localStorage["persist:cherry-studio"])
+	if strings.TrimSpace(persistStr) != "" {
+		persistSlices := map[string]any{}
+		if err := json.Unmarshal([]byte(persistStr), &persistSlices); err != nil {
+			issues = append(issues, "parse persist:cherry-studio failed: "+err.Error())
+		} else {
+			decoded := map[string]any{}
+			for k, v := range persistSlices {
+				s, ok := v.(string)
+				if !ok {
+					decoded[k] = v
+					continue
+				}
+				var parsed any
+				if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+					continue
+				}
+				decoded[k] = parsed
+			}
+			llm := asMap(decoded["llm"])
+			modelIDs := map[string]struct{}{}
+			providerIDs := map[string]struct{}{}
+			for _, pItem := range toSlice(llm["providers"]) {
+				pm := asMap(pItem)
+				providerID := strings.TrimSpace(str(pm["id"]))
+				if providerID == "" {
+					issues = append(issues, "llm.providers has provider with empty id")
+					continue
+				}
+				providerIDs[providerID] = struct{}{}
+				models := toSlice(pm["models"])
+				if len(models) == 0 {
+					issues = append(issues, "llm.providers has provider without models: "+providerID)
+				}
+				for _, mItem := range models {
+					mm := asMap(mItem)
+					modelID := firstNonEmpty(str(mm["id"]), str(mm["modelId"]))
+					if modelID == "" {
+						issues = append(issues, "llm.providers model missing id: "+providerID)
+						continue
+					}
+					modelIDs[modelID] = struct{}{}
+					if alt := strings.TrimSpace(str(mm["modelId"])); alt != "" {
+						modelIDs[alt] = struct{}{}
+					}
+					modelProvider := strings.TrimSpace(str(mm["provider"]))
+					if modelProvider == "" {
+						issues = append(issues, "llm.providers model missing provider: "+modelID)
+						continue
+					}
+					if _, ok := providerIDs[modelProvider]; !ok {
+						issues = append(issues, "llm.providers model provider not found: "+modelProvider)
+					}
+				}
+			}
+			for _, key := range []string{"defaultModel", "quickModel", "translateModel", "topicNamingModel"} {
+				m := asMap(llm[key])
+				if len(m) == 0 {
+					continue
+				}
+				if len(modelIDs) == 0 {
+					continue
+				}
+				modelID := firstNonEmpty(str(m["id"]), str(m["modelId"]))
+				if modelID == "" {
+					issues = append(issues, "llm."+key+" missing model id")
+					continue
+				}
+				if _, ok := modelIDs[modelID]; !ok {
+					issues = append(issues, "llm."+key+" not found in llm.providers: "+modelID)
+				}
+			}
+
+			assistantsSlice := asMap(decoded["assistants"])
+			for _, aItem := range toSlice(assistantsSlice["assistants"]) {
+				assistant := asMap(aItem)
+				model := asMap(assistant["model"])
+				modelID := firstNonEmpty(str(model["id"]), str(model["modelId"]))
+				if modelID == "" {
+					continue
+				}
+				if len(modelIDs) == 0 {
+					continue
+				}
+				if _, ok := modelIDs[modelID]; !ok {
+					issues = append(issues, "assistant model not found in llm.providers: "+modelID)
+				}
+			}
+		}
+	}
 	if len(issues) > 0 {
 		return errors.New(strings.Join(dedupeWarnings(issues), "; "))
 	}
 	return nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func sidecarExists(root string) bool {
+	manifestPath := filepath.Join(root, "cherrikka", "manifest.json")
+	sourcePath := filepath.Join(root, "cherrikka", "raw", "source.zip")
+	if _, err := os.Stat(manifestPath); err != nil {
+		return false
+	}
+	if _, err := os.Stat(sourcePath); err != nil {
+		return false
+	}
+	return true
 }

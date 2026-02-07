@@ -39,6 +39,8 @@ export async function inspect(file: File, onProgress?: ProgressReporter): Promis
         assistants: 0,
         hasWebdav: false,
         hasS3: false,
+        isolatedConfigItems: 0,
+        rehydrationAvailable: false,
       },
       fileSummary: {
         total: 0,
@@ -83,6 +85,8 @@ export async function validate(file: File, onProgress?: ProgressReporter): Promi
         assistants: 0,
         hasWebdav: false,
         hasS3: false,
+        isolatedConfigItems: 0,
+        rehydrationAvailable: false,
       },
       fileSummary: {
         total: 0,
@@ -155,6 +159,8 @@ export async function convert(request: ConvertRequest, onProgress?: ProgressRepo
 
   report(onProgress, 'parse', 24, `Parsing ${detected.format} backup`);
   const sourceIr = await parseByFormat(detected.format, sourceEntries);
+  const rehydrateWarnings = await tryRehydrateFromSidecar(sourceEntries, request.to, sourceIr);
+  sourceIr.warnings.push(...rehydrateWarnings);
   sourceIr.targetFormat = request.to;
   sourceIr.detectedHints = detected.hints;
   sourceIr.warnings.push(...ensureNormalizedSettings(sourceIr));
@@ -211,6 +217,71 @@ export async function convert(request: ConvertRequest, onProgress?: ProgressRepo
   };
 }
 
+async function tryRehydrateFromSidecar(
+  sourceEntries: Map<string, Uint8Array>,
+  targetFormat: 'cherry' | 'rikka',
+  sourceIr: BackupIR,
+): Promise<string[]> {
+  const manifest = readJsonEntry<Manifest>(sourceEntries, 'cherrikka/manifest.json');
+  const sourceZipBytes = sourceEntries.get('cherrikka/raw/source.zip');
+  if (!manifest || !sourceZipBytes) {
+    return [];
+  }
+  const sidecarSourceFormat = String(manifest.sourceFormat ?? '').trim().toLowerCase();
+  if (sidecarSourceFormat !== targetFormat) {
+    return [];
+  }
+
+  try {
+    const rawEntries = await readZipBlob(new Blob([sourceZipBytes], { type: 'application/zip' }));
+    const detected = detectFormat(rawEntries);
+    if (detected.format === 'unknown') {
+      return ['sidecar-rehydrate:source-format-unknown'];
+    }
+    if (detected.format !== targetFormat) {
+      return ['sidecar-rehydrate:source-format-mismatch'];
+    }
+
+    const rawIr = await parseByFormat(detected.format, rawEntries);
+    if (targetFormat === 'cherry') {
+      const restoredSettings = asObject(rawIr.config['cherry.settings']);
+      const restoredLLM = asObject(rawIr.config['cherry.llm']);
+      const restoredPersist = asObject(rawIr.config['cherry.persistSlices']);
+      if (Object.keys(restoredSettings).length > 0) {
+        sourceIr.config['rehydrate.cherry.settings'] = restoredSettings;
+      }
+      if (Object.keys(restoredLLM).length > 0) {
+        sourceIr.config['rehydrate.cherry.llm'] = restoredLLM;
+      }
+      if (Object.keys(restoredPersist).length > 0) {
+        sourceIr.config['rehydrate.cherry.persistSlices'] = restoredPersist;
+      }
+      const restoredUnsupported = asObject(rawIr.opaque['interop.cherry.unsupported']);
+      if (Object.keys(restoredUnsupported).length > 0) {
+        sourceIr.opaque['interop.cherry.unsupported'] = restoredUnsupported;
+      }
+    } else {
+      const restoredSettings = asObject(rawIr.config['rikka.settings']);
+      if (Object.keys(restoredSettings).length > 0) {
+        sourceIr.config['rehydrate.rikka.settings'] = restoredSettings;
+      }
+      const restoredUnsupported = asObject(rawIr.opaque['interop.rikka.unsupported']);
+      if (Object.keys(restoredUnsupported).length > 0) {
+        sourceIr.opaque['interop.rikka.unsupported'] = restoredUnsupported;
+      }
+    }
+    sourceIr.opaque['interop.sidecar'] = {
+      rehydrated: true,
+      sourceFormat: sidecarSourceFormat,
+      targetFormat,
+      depth: 1,
+    };
+    return ['sidecar-rehydrate:applied'];
+  } catch {
+    return ['sidecar-rehydrate:parse-source-failed'];
+  }
+}
+
 async function parseByFormat(format: 'cherry' | 'rikka', entries: Map<string, Uint8Array>): Promise<BackupIR> {
   if (format === 'cherry') {
     return parseCherryArchive(entries);
@@ -235,6 +306,11 @@ function summarizeConfig(ir: BackupIR | null): ConfigSummary {
     assistants: asArrayLen(ir.settings['core.assistants']),
     hasWebdav: Object.keys(asObject(ir.settings['sync.webdav'])).length > 0,
     hasS3: Object.keys(asObject(ir.settings['sync.s3'])).length > 0,
+    isolatedConfigItems: countIsolatedConfig(
+      asObject(ir.opaque['interop.rikka.unsupported']),
+      asObject(ir.opaque['interop.cherry.unsupported']),
+    ),
+    rehydrationAvailable: Boolean(ir.opaque['interop.sidecar.available']),
   };
 }
 
@@ -287,8 +363,44 @@ function asObject(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function readJsonEntry<T>(entries: Map<string, Uint8Array>, path: string): T | null {
+  const payload = entries.get(path);
+  if (!payload) {
+    return null;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(payload)) as T;
+  } catch {
+    return null;
+  }
+}
+
 function asArrayLen(value: unknown): number {
   return Array.isArray(value) ? value.length : 0;
+}
+
+function countIsolatedConfig(...values: Array<Record<string, unknown>>): number {
+  let total = 0;
+  for (const value of values) {
+    total += countMapLeaves(value);
+  }
+  return total;
+}
+
+function countMapLeaves(value: Record<string, unknown>): number {
+  let total = 0;
+  for (const item of Object.values(value)) {
+    if (item && typeof item === 'object') {
+      if (Array.isArray(item)) {
+        total += item.length;
+      } else {
+        total += countMapLeaves(item as Record<string, unknown>);
+      }
+    } else {
+      total += 1;
+    }
+  }
+  return total;
 }
 
 function report(onProgress: ProgressReporter | undefined, stage: string, progress: number, message: string): void {

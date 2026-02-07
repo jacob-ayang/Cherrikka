@@ -18,10 +18,12 @@ import (
 )
 
 type ConfigSummary struct {
-	Providers  int  `json:"providers"`
-	Assistants int  `json:"assistants"`
-	HasWebDAV  bool `json:"hasWebdav"`
-	HasS3      bool `json:"hasS3"`
+	Providers           int  `json:"providers"`
+	Assistants          int  `json:"assistants"`
+	HasWebDAV           bool `json:"hasWebdav"`
+	HasS3               bool `json:"hasS3"`
+	IsolatedConfigItems int  `json:"isolatedConfigItems,omitempty"`
+	RehydrationAvail    bool `json:"rehydrationAvailable,omitempty"`
 }
 
 type FileSummary struct {
@@ -178,6 +180,11 @@ func Convert(opts ConvertOptions) (*ir.Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
+	rehydrateWarnings, err := tryRehydrateFromSidecar(inDir, to, sourceIR)
+	if err != nil {
+		return nil, err
+	}
+	sourceIR.Warnings = append(sourceIR.Warnings, rehydrateWarnings...)
 	sourceIR.Warnings = append(sourceIR.Warnings, mapping.EnsureNormalizedSettings(sourceIR)...)
 	sourceIR.TargetFormat = to
 	sourceIR.DetectedHints = d.Hints
@@ -250,6 +257,90 @@ func Convert(opts ConvertOptions) (*ir.Manifest, error) {
 		return nil, err
 	}
 	return manifest, nil
+}
+
+func tryRehydrateFromSidecar(inputDir, targetFormat string, sourceIR *ir.BackupIR) ([]string, error) {
+	manifestPath := filepath.Join(inputDir, "cherrikka", "manifest.json")
+	sourceZipPath := filepath.Join(inputDir, "cherrikka", "raw", "source.zip")
+	if _, err := os.Stat(manifestPath); err != nil {
+		return nil, nil
+	}
+	if _, err := os.Stat(sourceZipPath); err != nil {
+		return nil, nil
+	}
+
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+	var manifest ir.Manifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return []string{"sidecar-rehydrate:invalid-manifest"}, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(manifest.SourceFormat), strings.TrimSpace(targetFormat)) {
+		return nil, nil
+	}
+
+	sidecarDir, cleanup, err := extractToTemp(sourceZipPath)
+	if err != nil {
+		return []string{"sidecar-rehydrate:extract-source-failed"}, nil
+	}
+	defer cleanup()
+
+	d := backup.DetectExtractedDir(sidecarDir)
+	if d.Format == backup.FormatUnknown {
+		return []string{"sidecar-rehydrate:source-format-unknown"}, nil
+	}
+	if !strings.EqualFold(string(d.Format), targetFormat) {
+		return []string{"sidecar-rehydrate:source-format-mismatch"}, nil
+	}
+
+	rawIR, err := parseByFormat(d.Format, sidecarDir)
+	if err != nil {
+		return []string{"sidecar-rehydrate:parse-source-failed"}, nil
+	}
+
+	switch strings.ToLower(strings.TrimSpace(targetFormat)) {
+	case "cherry":
+		if raw := mapAny(rawIR.Config["cherry.settings"]); len(raw) > 0 {
+			sourceIR.Config["rehydrate.cherry.settings"] = raw
+		}
+		if raw := mapAny(rawIR.Config["cherry.llm"]); len(raw) > 0 {
+			sourceIR.Config["rehydrate.cherry.llm"] = raw
+		}
+		if raw := mapAny(rawIR.Config["cherry.persistSlices"]); len(raw) > 0 {
+			sourceIR.Config["rehydrate.cherry.persistSlices"] = raw
+		}
+		if raw := mapAny(rawIR.Opaque["interop.cherry.unsupported"]); len(raw) > 0 {
+			sourceIR.Opaque["interop.cherry.unsupported"] = raw
+		}
+	case "rikka":
+		if raw := mapAny(rawIR.Config["rikka.settings"]); len(raw) > 0 {
+			sourceIR.Config["rehydrate.rikka.settings"] = raw
+		}
+		if raw := mapAny(rawIR.Opaque["interop.rikka.unsupported"]); len(raw) > 0 {
+			sourceIR.Opaque["interop.rikka.unsupported"] = raw
+		}
+	}
+
+	if sourceIR.Opaque == nil {
+		sourceIR.Opaque = map[string]any{}
+	}
+	sourceIR.Opaque["interop.sidecar"] = map[string]any{
+		"rehydrated":   true,
+		"sourceFormat": strings.ToLower(strings.TrimSpace(manifest.SourceFormat)),
+		"targetFormat": strings.ToLower(strings.TrimSpace(targetFormat)),
+		"depth":        1,
+	}
+	return []string{"sidecar-rehydrate:applied"}, nil
+}
+
+func mapAny(v any) map[string]any {
+	m, _ := v.(map[string]any)
+	if m == nil {
+		return map[string]any{}
+	}
+	return m
 }
 
 func parseByFormat(format backup.Format, dir string) (*ir.BackupIR, error) {
@@ -326,6 +417,11 @@ func summarizeConfig(parsed *ir.BackupIR) *ConfigSummary {
 		Assistants: len(asSlice(parsed.Settings["core.assistants"])),
 		HasWebDAV:  len(asMap(parsed.Settings["sync.webdav"])) > 0,
 		HasS3:      len(asMap(parsed.Settings["sync.s3"])) > 0,
+		IsolatedConfigItems: countIsolatedConfig(
+			asMap(parsed.Opaque["interop.rikka.unsupported"]),
+			asMap(parsed.Opaque["interop.cherry.unsupported"]),
+		),
+		RehydrationAvail: asBool(parsed.Opaque["interop.sidecar.available"]),
 	}
 	return s
 }
@@ -400,4 +496,35 @@ func dedupeStrings(in []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func countIsolatedConfig(values ...map[string]any) int {
+	total := 0
+	for _, item := range values {
+		total += countMapLeaves(item)
+	}
+	return total
+}
+
+func countMapLeaves(m map[string]any) int {
+	if len(m) == 0 {
+		return 0
+	}
+	total := 0
+	for _, v := range m {
+		switch t := v.(type) {
+		case map[string]any:
+			total += countMapLeaves(t)
+		case []any:
+			total += len(t)
+		default:
+			total++
+		}
+	}
+	return total
+}
+
+func asBool(v any) bool {
+	b, _ := v.(bool)
+	return b
 }

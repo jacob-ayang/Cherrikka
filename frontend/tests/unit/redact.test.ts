@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactAny, shouldRedactKey } from '../../src/core/util/redact';
+import { redactAny, shouldRedactKey } from '../../src/engine/util/redact';
 
 describe('redact', () => {
   it('detects secret keys by token', () => {

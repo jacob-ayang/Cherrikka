@@ -407,3 +407,127 @@ func TestBuildCherryPersistSlicesFromIR(t *testing.T) {
 		t.Fatalf("expected mapped webdavHost, got=%v", settings["webdavHost"])
 	}
 }
+
+func TestBuildCherryPersistSlicesFromIR_RikkaModelToCherryModelShape(t *testing.T) {
+	cfg := map[string]any{
+		"rikka.settings": map[string]any{
+			"providers": []any{
+				map[string]any{
+					"id":   "rp-openai",
+					"type": "openai",
+					"models": []any{
+						map[string]any{
+							"id":          "7fd8fb8e-b469-4dbc-8daa-40b2ac73b8e8",
+							"modelId":     "gpt-4o-mini",
+							"displayName": "GPT-4o Mini",
+							"type":        "CHAT",
+						},
+					},
+				},
+			},
+			"assistants": []any{
+				map[string]any{
+					"id":          "ra1",
+					"name":        "R1",
+					"systemPrompt": "S",
+					"chatModelId": "7fd8fb8e-b469-4dbc-8daa-40b2ac73b8e8",
+				},
+			},
+			"assistantId":  "ra1",
+			"chatModelId":  "7fd8fb8e-b469-4dbc-8daa-40b2ac73b8e8",
+			"titleModelId": "7fd8fb8e-b469-4dbc-8daa-40b2ac73b8e8",
+		},
+	}
+	norm, _ := NormalizeFromRikkaConfig(cfg)
+	in := &ir.BackupIR{
+		SourceFormat: "rikka",
+		Settings:     norm,
+		Config:       cfg,
+	}
+	assistantsSlice := map[string]any{
+		"defaultAssistant": map[string]any{"id": "default"},
+		"assistants":       []any{},
+	}
+
+	persist, warnings := BuildCherryPersistSlicesFromIR(in, map[string]any{}, assistantsSlice)
+	_ = warnings
+	llm := asMap(persist["llm"])
+	providers := asSlice(llm["providers"])
+	if len(providers) != 1 {
+		t.Fatalf("expected 1 provider, got=%d", len(providers))
+	}
+	models := asSlice(asMap(providers[0])["models"])
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got=%d", len(models))
+	}
+	model := asMap(models[0])
+	if got := pickFirstString(model["id"]); got != "gpt-4o-mini" {
+		t.Fatalf("expected cherry model id from rikka modelId, got=%s", got)
+	}
+	if got := pickFirstString(model["provider"]); got != "rp-openai" {
+		t.Fatalf("expected cherry model provider=rp-openai, got=%s", got)
+	}
+	defaultModel := asMap(llm["defaultModel"])
+	if got := pickFirstString(defaultModel["id"]); got != "gpt-4o-mini" {
+		t.Fatalf("expected defaultModel id=gpt-4o-mini, got=%s", got)
+	}
+}
+
+func TestBuildRikkaSettingsFromIR_SidecarRehydrateOverlay(t *testing.T) {
+	in := &ir.BackupIR{
+		SourceFormat: "cherry",
+		Settings: map[string]any{
+			"core.providers": []any{},
+			"core.assistants": []any{},
+		},
+		Config: map[string]any{
+			"rehydrate.rikka.settings": map[string]any{
+				"modeInjections": []any{
+					map[string]any{"id": "mi-1", "name": "Mode 1"},
+				},
+				"providers": []any{
+					map[string]any{
+						"id":      "bbca173f-f4d7-4db0-b4cf-9c9d5756eb03",
+						"type":    "openai",
+						"name":    "OpenAI",
+						"enabled": true,
+						"models": []any{
+							map[string]any{
+								"id":          "d8f480f2-2982-4d86-a67f-31e7d6f44d40",
+								"modelId":     "gpt-4o-mini",
+								"displayName": "GPT-4o Mini",
+								"type":        "CHAT",
+							},
+						},
+					},
+				},
+				"assistants": []any{
+					map[string]any{
+						"id":          "6f518bcc-f22f-4429-88e2-06995ba13653",
+						"name":        "A1",
+						"chatModelId": "d8f480f2-2982-4d86-a67f-31e7d6f44d40",
+					},
+				},
+				"assistantId": "6f518bcc-f22f-4429-88e2-06995ba13653",
+			},
+		},
+	}
+
+	settings, warnings := BuildRikkaSettingsFromIR(in, map[string]any{})
+	if _, ok := settings["modeInjections"]; !ok {
+		t.Fatalf("expected modeInjections restored from sidecar rehydrate")
+	}
+	if len(asSlice(settings["providers"])) == 0 {
+		t.Fatalf("expected providers restored from sidecar rehydrate")
+	}
+	found := false
+	for _, w := range warnings {
+		if w == "sidecar-rehydrate:rikka.settings" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected sidecar-rehydrate warning")
+	}
+}
