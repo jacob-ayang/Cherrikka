@@ -76,7 +76,7 @@ export async function convert(request: ConvertRequest, pushProgress?: ProgressSi
   outputEntries.set('cherrikka/raw/source.zip', sourceBytes);
 
   report(pushProgress, 'pack', 94, 'Packing zip');
-  const outputBlob = await writeZipBlob(outputEntries);
+  const outputBlob = await writeZipBlob(outputEntries, request.to);
 
   if (manifest.warnings.length > 0) {
     report(pushProgress, 'warn', 97, `${manifest.warnings.length} warning(s) generated`, 'warning');

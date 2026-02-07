@@ -1,6 +1,8 @@
 import { BlobReader, BlobWriter, TextReader, Uint8ArrayReader, Uint8ArrayWriter, ZipReader, ZipWriter } from '@zip.js/zip.js';
 import { marshalGoJSON } from '../util/go_json';
 
+export type ZipProfile = 'cherry' | 'rikka';
+
 export async function readZipBlob(input: Blob): Promise<Map<string, Uint8Array>> {
   const out = new Map<string, Uint8Array>();
   const reader = new ZipReader(new BlobReader(input));
@@ -15,31 +17,43 @@ export async function readZipBlob(input: Blob): Promise<Map<string, Uint8Array>>
   return out;
 }
 
-export async function writeZipBlob(entries: Map<string, Uint8Array>): Promise<Blob> {
-  const writer = new ZipWriter(new BlobWriter('application/zip'), {
-    // Rikka importer is strict on some ZIP variants; prefer safest layout.
+function getZipProfileOptions(profile: ZipProfile): Record<string, unknown> {
+  if (profile === 'rikka') {
+    return {
+      msDosCompatible: true,
+      versionMadeBy: 20,
+      extendedTimestamp: false,
+      useUnicodeFileNames: false,
+      // Store mode + non-streaming headers maximize Rikka importer compatibility.
+      compressionMethod: 0,
+      level: 0,
+      dataDescriptor: false,
+      dataDescriptorSignature: false,
+    };
+  }
+
+  return {
     msDosCompatible: true,
     versionMadeBy: 20,
     extendedTimestamp: false,
     useUnicodeFileNames: false,
-    // Store mode + non-streaming headers maximize importer compatibility.
-    compressionMethod: 0,
-    level: 0,
-    dataDescriptor: false,
-    dataDescriptorSignature: false,
+    // Cherry side is compatible with deflate; keep compressed outputs.
+    compressionMethod: 8,
+    dataDescriptor: true,
+    dataDescriptorSignature: true,
+  };
+}
+
+export async function writeZipBlob(entries: Map<string, Uint8Array>, profile: ZipProfile = 'cherry'): Promise<Blob> {
+  const profileOptions = getZipProfileOptions(profile);
+  const writer = new ZipWriter(new BlobWriter('application/zip'), {
+    ...profileOptions,
     keepOrder: true,
   });
   const names = [...entries.keys()].sort();
   for (const name of names) {
     await writer.add(name, new Uint8ArrayReader(entries.get(name) ?? new Uint8Array()), {
-      msDosCompatible: true,
-      versionMadeBy: 20,
-      extendedTimestamp: false,
-      useUnicodeFileNames: false,
-      compressionMethod: 0,
-      level: 0,
-      dataDescriptor: false,
-      dataDescriptorSignature: false,
+      ...profileOptions,
     });
   }
   return writer.close();
