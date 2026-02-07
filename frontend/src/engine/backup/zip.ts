@@ -17,16 +17,16 @@ export async function readZipBlob(input: Blob): Promise<Map<string, Uint8Array>>
 
 export async function writeZipBlob(entries: Map<string, Uint8Array>): Promise<Blob> {
   const writer = new ZipWriter(new BlobWriter('application/zip'), {
-    // Match Go archive/zip compatibility profile as closely as possible.
+    // Rikka importer is strict on some ZIP variants; prefer safest layout.
     msDosCompatible: true,
     versionMadeBy: 20,
-    // zip.js adds PKWARE NTFS extra fields when extended timestamps are on;
-    // disabling avoids Android importer edge cases and aligns with CLI flags.
     extendedTimestamp: false,
     useUnicodeFileNames: false,
-    // Go archive/zip writes signed streaming data descriptors (PK\x07\x08).
-    // Some importers are stricter and may fail without the signature.
-    dataDescriptorSignature: true,
+    // Store mode + non-streaming headers maximize importer compatibility.
+    compressionMethod: 0,
+    level: 0,
+    dataDescriptor: false,
+    dataDescriptorSignature: false,
     keepOrder: true,
   });
   const names = [...entries.keys()].sort();
@@ -36,7 +36,10 @@ export async function writeZipBlob(entries: Map<string, Uint8Array>): Promise<Bl
       versionMadeBy: 20,
       extendedTimestamp: false,
       useUnicodeFileNames: false,
-      dataDescriptorSignature: true,
+      compressionMethod: 0,
+      level: 0,
+      dataDescriptor: false,
+      dataDescriptorSignature: false,
     });
   }
   return writer.close();
