@@ -172,4 +172,49 @@ describe('settings mapping', () => {
     expect(assistants[0].mcpServers).toBeUndefined();
     expect(warnings).toContain('dropped non-uuid assistant field: mcpServers');
   });
+
+  it('renames duplicated assistant names to avoid conflicts', () => {
+    const [normalized] = normalizeFromCherryConfig({
+      'cherry.persistSlices': {
+        assistants: {
+          assistants: [
+            { id: 'a1', name: '默认助手', prompt: 'p', model: { id: 'm1' } },
+            { id: 'a2', name: '默认助手', prompt: 'p2', model: { id: 'm1' } },
+          ],
+        },
+        settings: {},
+        llm: {
+          defaultModel: { id: 'm1' },
+          providers: [
+            {
+              id: 'p1',
+              type: 'openai',
+              models: [{ id: 'm1', modelId: 'm1', name: 'm1' }],
+            },
+          ],
+        },
+      },
+    });
+
+    const ir: BackupIR = {
+      sourceApp: 'cherry-studio',
+      sourceFormat: 'cherry',
+      createdAt: new Date().toISOString(),
+      assistants: [],
+      conversations: [],
+      files: [],
+      config: {},
+      settings: normalized,
+      opaque: {},
+      secrets: {},
+      warnings: [],
+    };
+
+    const [settings, warnings] = buildRikkaSettingsFromIR(ir, {});
+    const assistants = settings.assistants as Array<Record<string, unknown>>;
+    expect(assistants).toHaveLength(2);
+    expect(assistants[0].name).toBe('默认助手');
+    expect(assistants[1].name).toBe('默认助手 (2)');
+    expect(warnings).toContain('assistant name conflict renamed: 默认助手 -> 默认助手 (2)');
+  });
 });

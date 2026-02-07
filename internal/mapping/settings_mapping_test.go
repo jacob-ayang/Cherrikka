@@ -195,6 +195,56 @@ func TestBuildRikkaSettingsFromIR_DropInvalidAssistantUUIDCollections(t *testing
 	}
 }
 
+func TestBuildRikkaSettingsFromIR_AssistantNameConflictRenamed(t *testing.T) {
+	cfg := map[string]any{
+		"cherry.persistSlices": map[string]any{
+			"assistants": map[string]any{
+				"assistants": []any{
+					map[string]any{"id": "a1", "name": "默认助手", "prompt": "p", "model": map[string]any{"id": "m1"}},
+					map[string]any{"id": "a2", "name": "默认助手", "prompt": "p2", "model": map[string]any{"id": "m1"}},
+				},
+			},
+			"llm": map[string]any{
+				"defaultModel": map[string]any{"id": "m1"},
+				"providers": []any{
+					map[string]any{"id": "p1", "type": "openai", "models": []any{map[string]any{"id": "m1"}}},
+				},
+			},
+		},
+	}
+
+	norm, _ := NormalizeFromCherryConfig(cfg)
+	in := &ir.BackupIR{
+		SourceFormat: "cherry",
+		Settings:     norm,
+		Config:       cfg,
+	}
+
+	settings, warnings := BuildRikkaSettingsFromIR(in, nil)
+	assistants := asSlice(settings["assistants"])
+	if len(assistants) != 2 {
+		t.Fatalf("expected 2 mapped assistants")
+	}
+	a1 := asMap(assistants[0])
+	a2 := asMap(assistants[1])
+	if str(a1["name"]) != "默认助手" {
+		t.Fatalf("expected first assistant keep name, got=%v", a1["name"])
+	}
+	if str(a2["name"]) != "默认助手 (2)" {
+		t.Fatalf("expected second assistant renamed, got=%v", a2["name"])
+	}
+	found := false
+	for _, w := range warnings {
+		if w == "assistant name conflict renamed: 默认助手 -> 默认助手 (2)" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected rename warning, got=%v", warnings)
+	}
+}
+
 func TestBuildCherryPersistSlicesFromIR(t *testing.T) {
 	cfg := map[string]any{
 		"rikka.settings": map[string]any{

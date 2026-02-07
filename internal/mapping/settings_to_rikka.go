@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"fmt"
 	"strings"
 
 	guuid "github.com/google/uuid"
@@ -197,15 +198,14 @@ func buildRikkaProviders(coreProviders []any, warnings *[]string) ([]any, map[st
 
 func buildRikkaAssistants(in *ir.BackupIR, coreAssistants []any, modelAlias map[string]string, warnings *[]string) []any {
 	out := make([]any, 0, len(coreAssistants)+len(in.Assistants))
+	usedNames := map[string]struct{}{}
 	appendAssistant := func(raw map[string]any) {
 		if len(raw) == 0 {
 			return
 		}
 		assistantSeed := pickFirstString(raw["id"], raw["name"], util.NewUUID())
 		raw["id"] = ensureUUID(pickFirstString(raw["id"]), "assistant:"+assistantSeed)
-		if str(raw["name"]) == "" {
-			raw["name"] = "Imported Assistant"
-		}
+		assignUniqueAssistantName(raw, usedNames, warnings)
 		sanitizeAssistantUUIDListField(raw, "mcpServers", warnings)
 		sanitizeAssistantUUIDListField(raw, "tags", warnings)
 		sanitizeAssistantUUIDListField(raw, "modeInjectionIds", warnings)
@@ -483,4 +483,26 @@ func sanitizeAssistantUUIDListField(raw map[string]any, key string, warnings *[]
 		return
 	}
 	raw[key] = kept
+}
+
+func assignUniqueAssistantName(raw map[string]any, used map[string]struct{}, warnings *[]string) {
+	base := strings.TrimSpace(str(raw["name"]))
+	if base == "" {
+		base = "Imported Assistant"
+	}
+	name := base
+	suffix := 2
+	for {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if _, exists := used[key]; !exists {
+			used[key] = struct{}{}
+			break
+		}
+		name = fmt.Sprintf("%s (%d)", base, suffix)
+		suffix++
+	}
+	raw["name"] = name
+	if name != base {
+		*warnings = appendUnique(*warnings, "assistant name conflict renamed: "+base+" -> "+name)
+	}
 }

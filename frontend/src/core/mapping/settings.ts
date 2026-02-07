@@ -546,10 +546,11 @@ function buildRikkaAssistants(
   warnings: string[],
 ): Record<string, unknown>[] {
   const result: Record<string, unknown>[] = [];
+  const usedAssistantNames = new Set<string>();
   const pushAssistant = (assistant: Record<string, unknown>): void => {
     const assistantSeed = pickFirstString(assistant.id, assistant.name, newId());
     assistant.id = ensureUuid(asString(assistant.id), `assistant:${assistantSeed}`);
-    if (!asString(assistant.name)) assistant.name = 'Imported Assistant';
+    assignUniqueAssistantName(assistant, usedAssistantNames, warnings);
     sanitizeAssistantUuidArray(assistant, 'mcpServers', warnings);
     sanitizeAssistantUuidArray(assistant, 'tags', warnings);
     sanitizeAssistantUuidArray(assistant, 'modeInjectionIds', warnings);
@@ -798,6 +799,25 @@ function sanitizeAssistantUuidArray(
     return;
   }
   assistant[key] = kept;
+}
+
+function assignUniqueAssistantName(
+  assistant: Record<string, unknown>,
+  used: Set<string>,
+  warnings: string[],
+): void {
+  const base = asString(assistant.name).trim() || 'Imported Assistant';
+  let name = base;
+  let suffix = 2;
+  while (used.has(name.toLowerCase())) {
+    name = `${base} (${suffix})`;
+    suffix += 1;
+  }
+  used.add(name.toLowerCase());
+  assistant.name = name;
+  if (name !== base) {
+    warnings.push(`assistant name conflict renamed: ${base} -> ${name}`);
+  }
 }
 
 function ensureUuid(candidate: string, seed: string): string {
