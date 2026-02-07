@@ -1,6 +1,6 @@
 import { convert, detectSource } from '../engine/service';
-import type { ProgressEvent } from '../engine/ir/types';
-import type { ConvertPayload, DetectPayload, WorkerCommand } from './protocol';
+import type { ConvertRequest, ProgressEvent } from '../engine/ir/types';
+import type { DetectPayload, WorkerCommand } from './protocol';
 
 export type ProgressSink = (event: ProgressEvent) => void;
 
@@ -11,8 +11,7 @@ export async function runTask(command: WorkerCommand, payload: unknown, pushProg
   }
 
   if (command === 'convert') {
-    const { request } = payload as ConvertPayload;
-    return convert(request, pushProgress);
+    return convert(payload as ConvertRequest, pushProgress);
   }
 
   throw new Error(`unsupported command: ${command}`);

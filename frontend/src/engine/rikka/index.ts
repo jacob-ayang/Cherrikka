@@ -4,6 +4,7 @@ import { readJsonEntry, writeJsonEntry } from '../backup/zip';
 import type { BackupIR, IRConversation, IRFile, IRMessage, IRPart } from '../ir/types';
 import { asArray, asBoolean, asNumber, asRecord, asString, cloneJson, dedupeStrings, nowIso, normalizeText, truncate } from '../util/common';
 import { basename, ensureOpenAIBaseUrl, extname, guessLogicalType } from '../util/file';
+import { marshalGoJSON } from '../util/go_json';
 import { sha256Hex } from '../util/hash';
 import { ensureUUID, newId } from '../util/id';
 import { openDatabase, tableExists } from '../../vendor/sql';
@@ -283,6 +284,15 @@ function parseRikkaAssistants(settings: Record<string, unknown>): BackupIR['assi
   const assistants: BackupIR['assistants'] = [];
   for (const raw of asArray(settings.assistants)) {
     const assistant = asRecord(raw);
+    const parsedSettings: Record<string, unknown> = {
+      contextCount: asNumber(assistant.contextMessageSize, 32),
+      streamOutput: asBoolean(assistant.streamOutput, true),
+      temperature: asNumber(assistant.temperature, 0.7),
+    };
+    const maxTokens = asNumber(assistant.maxTokens, 0);
+    if (maxTokens > 0) {
+      parsedSettings.maxTokens = maxTokens;
+    }
     assistants.push({
       id: asString(assistant.id) || newId(),
       name: asString(assistant.name) || 'Imported Assistant',
@@ -290,12 +300,7 @@ function parseRikkaAssistants(settings: Record<string, unknown>): BackupIR['assi
       model: {
         chatModelId: asString(assistant.chatModelId),
       },
-      settings: {
-        contextCount: asNumber(assistant.contextMessageSize, 32),
-        streamOutput: asBoolean(assistant.streamOutput, true),
-        temperature: asNumber(assistant.temperature, 0.7),
-        maxTokens: asNumber(assistant.maxTokens, 0),
-      },
+      settings: parsedSettings,
       opaque: assistant,
     });
   }
@@ -313,11 +318,13 @@ function buildRikkaSettings(ir: BackupIR, warnings: string[]): Record<string, un
   const fromCherry = asRecord(ir.config['cherry.persistSlices']);
   const llm = asRecord(fromCherry.llm);
   const providersRaw = asArray(llm.providers);
+  const modelAlias = new Map<string, string>();
 
-  const providers = providersRaw.map((raw) => normalizeProvider(asRecord(raw), warnings));
+  const providers = providersRaw.map((raw) => normalizeProvider(asRecord(raw), warnings, modelAlias));
 
   const modelIndex = new Map<string, string>();
   for (const provider of providers) {
+    if (!asBoolean(provider.enabled, true)) continue;
     for (const modelRaw of asArray(provider.models)) {
       const model = asRecord(modelRaw);
       const id = asString(model.id) || asString(model.modelId);
@@ -326,16 +333,16 @@ function buildRikkaSettings(ir: BackupIR, warnings: string[]): Record<string, un
   }
 
   const fallbackModel = modelIndex.keys().next().value || newId();
-  const assistants = buildRikkaAssistants(ir.assistants, fallbackModel);
+  const assistants = buildRikkaAssistants(ir.assistants, fallbackModel, modelAlias, warnings);
 
   const settings: Record<string, unknown> = {
     providers,
     assistants,
     assistantId: asString(assistants[0]?.id),
-    chatModelId: pickCherrySelectedModel(llm, 'defaultModel', fallbackModel),
-    titleModelId: pickCherrySelectedModel(llm, 'topicNamingModel', fallbackModel),
-    translateModeId: pickCherrySelectedModel(llm, 'translateModel', fallbackModel),
-    suggestionModelId: pickCherrySelectedModel(llm, 'quickModel', fallbackModel),
+    chatModelId: pickCherrySelectedModel(llm, 'defaultModel', fallbackModel, modelAlias),
+    titleModelId: pickCherrySelectedModel(llm, 'topicNamingModel', fallbackModel, modelAlias),
+    translateModeId: pickCherrySelectedModel(llm, 'translateModel', fallbackModel, modelAlias),
+    suggestionModelId: pickCherrySelectedModel(llm, 'quickModel', fallbackModel, modelAlias),
     imageGenerationModelId: fallbackModel,
     enableWebSearch: false,
     mcpServers: [],
@@ -361,26 +368,37 @@ function buildRikkaSettings(ir: BackupIR, warnings: string[]): Record<string, un
 }
 
 function normalizeRikkaSettings(settings: Record<string, unknown>, warnings: string[]): void {
-  const providers = asArray(settings.providers).map((raw) => normalizeProvider(asRecord(raw), warnings));
+  const modelAlias = new Map<string, string>();
+  const providers = asArray(settings.providers).map((raw) => normalizeProvider(asRecord(raw), warnings, modelAlias));
   settings.providers = providers;
 
   const modelIds = new Set<string>();
+  const allModelIds = new Set<string>();
   for (const providerRaw of providers) {
     const provider = asRecord(providerRaw);
+    const providerEnabled = asBoolean(provider.enabled, true);
     const models = asArray(provider.models);
     for (const modelRaw of models) {
       const model = asRecord(modelRaw);
       const id = asString(model.id) || asString(model.modelId);
-      if (id) modelIds.add(id);
+      if (!id) continue;
+      allModelIds.add(id);
+      if (providerEnabled) modelIds.add(id);
     }
   }
 
-  const fallbackModel = modelIds.values().next().value || newId();
+  const fallbackModel = modelIds.values().next().value || allModelIds.values().next().value || newId();
 
-  const assistants = asArray(settings.assistants).map((raw) => {
+  const usedNames = new Set<string>();
+  const assistants = asArray(settings.assistants).map((raw, index) => {
     const assistant = asRecord(raw);
     const id = asString(assistant.id) || newId();
-    let chatModelId = asString(assistant.chatModelId);
+    const name = uniqueAssistantName(
+      asString(assistant.name) || `Imported Assistant ${index + 1}`,
+      usedNames,
+      warnings,
+    );
+    let chatModelId = resolveModelAlias(asString(assistant.chatModelId), modelAlias);
     if (!chatModelId || !modelIds.has(chatModelId)) {
       chatModelId = fallbackModel;
       warnings.push(`assistant-model-fallback:${id}`);
@@ -388,14 +406,16 @@ function normalizeRikkaSettings(settings: Record<string, unknown>, warnings: str
 
     const out: Record<string, unknown> = {
       id,
-      name: asString(assistant.name) || 'Imported Assistant',
+      name,
       systemPrompt: asString(assistant.systemPrompt),
       chatModelId,
       contextMessageSize: asNumber(assistant.contextMessageSize, 32),
       streamOutput: asBoolean(assistant.streamOutput, true),
       temperature: asNumber(assistant.temperature, 0.7),
-      topP: asNumber(assistant.topP, 1),
     };
+    if (Object.prototype.hasOwnProperty.call(assistant, 'topP')) {
+      out.topP = asNumber(assistant.topP, 1);
+    }
 
     const maxTokens = asNumber(assistant.maxTokens, 0);
     if (maxTokens > 0) {
@@ -409,38 +429,82 @@ function normalizeRikkaSettings(settings: Record<string, unknown>, warnings: str
   settings.assistantId = asString(settings.assistantId) || asString(assistants[0]?.id);
 
   for (const key of ['chatModelId', 'titleModelId', 'translateModeId', 'suggestionModelId', 'imageGenerationModelId']) {
-    const current = asString(settings[key]);
+    const current = resolveModelAlias(asString(settings[key]), modelAlias);
     settings[key] = current && modelIds.has(current) ? current : fallbackModel;
   }
 }
 
-function normalizeProvider(provider: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
+function normalizeProvider(
+  provider: Record<string, unknown>,
+  warnings: string[],
+  modelAlias?: Map<string, string>,
+): Record<string, unknown> {
+  const providerSeed = asString(provider.id) || asString(provider.name) || asString(provider.type) || newId();
+  const providerId = ensureUUID(asString(provider.id), `provider:${providerSeed}`);
   const out: Record<string, unknown> = {
-    ...provider,
+    id: providerId,
+    name: asString(provider.name) || 'Imported Provider',
   };
-  out.id = asString(provider.id) || newId();
-  out.name = asString(provider.name) || 'Imported Provider';
-  out.type = asString(provider.type) || 'openai';
+  const mappedType = mapProviderTypeToRikka(asString(provider.type));
+  out.type = mappedType || 'openai';
 
   const rawBase = asString(provider.baseUrl) || asString(provider.apiHost);
-  out.baseUrl = out.type === 'openai' ? ensureOpenAIBaseUrl(rawBase) : rawBase;
+  if (out.type === 'openai') {
+    out.baseUrl = ensureOpenAIBaseUrl(rawBase || 'https://api.openai.com/v1');
+    const chatPath = asString(provider.chatCompletionsPath) || asString(provider.apiPath) || '/chat/completions';
+    out.chatCompletionsPath = chatPath;
+    if (typeof provider.apiKey === 'string' && provider.apiKey.length > 0) out.apiKey = provider.apiKey;
+    if (typeof provider.useResponseApi === 'boolean') out.useResponseApi = provider.useResponseApi;
+  } else if (out.type === 'claude') {
+    out.baseUrl = rawBase || 'https://api.anthropic.com/v1';
+    if (typeof provider.apiKey === 'string' && provider.apiKey.length > 0) out.apiKey = provider.apiKey;
+  } else if (out.type === 'google') {
+    out.baseUrl = rawBase || 'https://generativelanguage.googleapis.com/v1beta';
+    if (typeof provider.apiKey === 'string' && provider.apiKey.length > 0) out.apiKey = provider.apiKey;
+    if (typeof provider.vertexAI === 'boolean') out.vertexAI = provider.vertexAI;
+    if (typeof provider.privateKey === 'string' && provider.privateKey.length > 0) out.privateKey = provider.privateKey;
+    if (typeof provider.serviceAccountEmail === 'string' && provider.serviceAccountEmail.length > 0) out.serviceAccountEmail = provider.serviceAccountEmail;
+    if (typeof provider.location === 'string' && provider.location.length > 0) out.location = provider.location;
+    if (typeof provider.projectId === 'string' && provider.projectId.length > 0) out.projectId = provider.projectId;
+  } else {
+    out.baseUrl = rawBase;
+  }
 
   const models = asArray(provider.models).map((raw) => {
     const m = asRecord(raw);
-    const id = asString(m.id) || asString(m.modelId) || newId();
-    return {
+    const modelRef = asString(m.modelId) || asString(m.id) || asString(m.name) || asString(m.displayName) || newId();
+    const id = ensureUUID(asString(m.id), `model:${providerId}:${modelRef}`);
+    const modelType = normalizeRikkaModelType(asString(m.type), warnings);
+    const model = {
       id,
-      modelId: asString(m.modelId) || id,
-      displayName: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
-      type: 'CHAT',
-      inputModalities: asArray(m.inputModalities).length ? asArray(m.inputModalities) : ['TEXT'],
-      outputModalities: asArray(m.outputModalities).length ? asArray(m.outputModalities) : ['TEXT'],
+      modelId: asString(m.modelId) || modelRef,
+      displayName: asString(m.displayName) || asString(m.name) || asString(m.modelId) || modelRef,
+      type: modelType,
     };
+    const inputModalities = asArray(m.inputModalities);
+    if (inputModalities.length > 0) {
+      (model as Record<string, unknown>).inputModalities = inputModalities;
+    }
+    const outputModalities = asArray(m.outputModalities);
+    if (outputModalities.length > 0) {
+      (model as Record<string, unknown>).outputModalities = outputModalities;
+    }
+    registerModelAlias(modelAlias, modelRef, id);
+    registerModelAlias(modelAlias, asString(m.id), id);
+    registerModelAlias(modelAlias, asString(m.displayName), id);
+    registerModelAlias(modelAlias, asString(m.name), id);
+    registerModelAlias(modelAlias, asString(model.modelId), id);
+    registerModelAlias(modelAlias, asString(model.displayName), id);
+    registerModelAlias(modelAlias, id, id);
+    return model;
   });
   out.models = models;
 
-  const enabled = asBoolean(provider.enabled, true) && models.length > 0;
+  const enabled = asBoolean(provider.enabled, true) && models.length > 0 && Boolean(mappedType);
   out.enabled = enabled;
+  if (!mappedType) {
+    warnings.push(`provider-invalid-disabled:${asString(out.name)}:unsupported-type`);
+  }
   if (asBoolean(provider.enabled, true) && models.length === 0) {
     warnings.push(`provider-invalid-disabled:${asString(out.name)}:no-models`);
   }
@@ -448,23 +512,32 @@ function normalizeProvider(provider: Record<string, unknown>, warnings: string[]
   return out;
 }
 
-function buildRikkaAssistants(assistants: BackupIR['assistants'], fallbackModelId: string): Record<string, unknown>[] {
+function buildRikkaAssistants(
+  assistants: BackupIR['assistants'],
+  fallbackModelId: string,
+  modelAlias: Map<string, string>,
+  warnings: string[],
+): Record<string, unknown>[] {
   const source = assistants.length > 0 ? assistants : [{ id: newId(), name: 'Imported Assistant', prompt: '' }];
+  const usedNames = new Set<string>();
 
-  return source.map((assistant) => {
+  return source.map((assistant, index) => {
     const rawSettings = asRecord(assistant.settings);
     const maxTokens = asNumber(rawSettings.maxTokens, 0);
+    const resolvedModel = resolveModelAlias(asString(asRecord(assistant.model).chatModelId), modelAlias);
 
     const out: Record<string, unknown> = {
       id: ensureUUID(assistant.id, `assistant:${assistant.id}:${assistant.name}`),
-      name: assistant.name || 'Imported Assistant',
+      name: uniqueAssistantName(assistant.name || `Imported Assistant ${index + 1}`, usedNames, warnings),
       systemPrompt: assistant.prompt || '',
-      chatModelId: asString(asRecord(assistant.model).chatModelId) || fallbackModelId,
+      chatModelId: resolvedModel || fallbackModelId,
       contextMessageSize: asNumber(rawSettings.contextCount, 32),
       streamOutput: asBoolean(rawSettings.streamOutput, true),
       temperature: asNumber(rawSettings.temperature, 0.7),
-      topP: asNumber(rawSettings.topP, 1),
     };
+    if (Object.prototype.hasOwnProperty.call(rawSettings, 'topP')) {
+      out.topP = asNumber(rawSettings.topP, 1);
+    }
 
     if (maxTokens > 0) {
       out.maxTokens = maxTokens;
@@ -474,10 +547,73 @@ function buildRikkaAssistants(assistants: BackupIR['assistants'], fallbackModelI
   });
 }
 
-function pickCherrySelectedModel(llm: Record<string, unknown>, key: string, fallback: string): string {
+function resolveModelAlias(candidate: string, modelAlias: Map<string, string>): string {
+  if (!candidate) return '';
+  if (modelAlias.has(candidate)) return asString(modelAlias.get(candidate));
+  const lower = candidate.toLowerCase();
+  if (modelAlias.has(lower)) return asString(modelAlias.get(lower));
+  return candidate;
+}
+
+function registerModelAlias(alias: Map<string, string> | undefined, key: string, id: string): void {
+  if (!alias || !key || !id) return;
+  if (!alias.has(key)) alias.set(key, id);
+  const lower = key.toLowerCase();
+  if (!alias.has(lower)) alias.set(lower, id);
+}
+
+function normalizeRikkaModelType(rawType: string, warnings: string[]): string {
+  const clean = rawType.trim().toUpperCase();
+  if (!clean) return 'CHAT';
+  const allowed = new Set(['CHAT', 'IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT']);
+  if (allowed.has(clean)) return clean;
+  warnings.push(`normalized unsupported model type to CHAT: ${rawType}`);
+  return 'CHAT';
+}
+
+function pickCherrySelectedModel(
+  llm: Record<string, unknown>,
+  key: string,
+  fallback: string,
+  modelAlias: Map<string, string>,
+): string {
   const model = asRecord(llm[key]);
-  const id = asString(model.id) || asString(model.modelId);
-  return id || fallback;
+  const id = asString(model.id) || asString(model.modelId) || asString(model.name) || asString(model.displayName);
+  const resolved = resolveModelAlias(id, modelAlias);
+  return resolved || fallback;
+}
+
+function mapProviderTypeToRikka(rawType: string): string {
+  const clean = rawType.trim().toLowerCase();
+  if (!clean) return 'openai';
+  if (['openai', 'openai-response', 'new-api', 'gateway', 'azure-openai', 'ollama', 'lmstudio', 'gpustack', 'aws-bedrock'].includes(clean)) {
+    return 'openai';
+  }
+  if (['anthropic', 'vertex-anthropic', 'claude'].includes(clean)) {
+    return 'claude';
+  }
+  if (['gemini', 'vertexai', 'google'].includes(clean)) {
+    return 'google';
+  }
+  return '';
+}
+
+function uniqueAssistantName(name: string, used: Set<string>, warnings: string[]): string {
+  const trimmed = name.trim() || 'Imported Assistant';
+  if (!used.has(trimmed)) {
+    used.add(trimmed);
+    return trimmed;
+  }
+
+  let index = 2;
+  let candidate = `${trimmed} (${index})`;
+  while (used.has(candidate)) {
+    index += 1;
+    candidate = `${trimmed} (${index})`;
+  }
+  used.add(candidate);
+  warnings.push(`assistant-name-conflict-renamed:${trimmed}->${candidate}`);
+  return candidate;
 }
 
 function redactRikkaSettings(settings: Record<string, unknown>): void {
@@ -516,6 +652,9 @@ function materializeRikkaFiles(
 
   for (const file of files) {
     let rel = asString(asRecord(file.metadata)['rikka.relative_path']);
+    if (!rel) {
+      rel = normalizeRikkaRelativePath(file.relativeSrc);
+    }
     if (!rel.startsWith('upload/') || used.has(rel)) {
       rel = `upload/${newId()}${file.ext || extname(file.name)}`;
     }
@@ -543,6 +682,15 @@ function materializeRikkaFiles(
   }
 
   return relById;
+}
+
+function normalizeRikkaRelativePath(input: string): string {
+  const clean = input.trim().replaceAll('\\\\', '/');
+  if (!clean) return '';
+  if (clean.startsWith('upload/')) return clean;
+  const name = basename(clean);
+  if (!name || name === '.' || name === '/') return '';
+  return `upload/${name}`;
 }
 
 function writeRikkaConversations(
@@ -589,7 +737,7 @@ function writeRikkaConversations(
 
       db.run(
         'INSERT INTO message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)',
-        [nodeId, convId, i, JSON.stringify([serialized]), 0],
+        [nodeId, convId, i, marshalGoJSON([serialized]), 0],
       );
 
       idMap[`message:${message.id}`] = asString(serialized.id);

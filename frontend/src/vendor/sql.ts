@@ -5,7 +5,7 @@ let sqlPromise: Promise<SqlJsStatic> | null = null;
 export async function getSqlJs(): Promise<SqlJsStatic> {
   if (!sqlPromise) {
     sqlPromise = initSqlJs({
-      locateFile: (file) => `/${file}`,
+      locateFile: (file) => resolveSqlWasmPath(file),
     });
   }
   return sqlPromise;
@@ -22,4 +22,11 @@ export function tableExists(db: Database, table: string): boolean {
   const exists = stmt.step() ? Number(stmt.getAsObject().c) > 0 : false;
   stmt.free();
   return exists;
+}
+
+function resolveSqlWasmPath(file: string): string {
+  if (typeof window !== 'undefined') {
+    return `/${file}`;
+  }
+  return new URL(`../../public/${file}`, import.meta.url).pathname;
 }

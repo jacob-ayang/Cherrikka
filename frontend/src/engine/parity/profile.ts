@@ -1,0 +1,39 @@
+export interface ParityProfile {
+  json: Record<string, string[]>;
+  sqlite: Record<
+    string,
+    {
+      ignoreColumns: Record<string, string[]>;
+      stripMessageFields: string[];
+    }
+  >;
+}
+
+export interface NormalizedSnapshot {
+  files: Record<string, string>;
+  warnings: string[];
+}
+
+export const DEFAULT_PARITY_PROFILE: ParityProfile = {
+  json: {
+    'cherrikka/manifest.json': ['createdAt'],
+    'data.json': [
+      'time',
+      'indexedDB.message_blocks[].id',
+      'indexedDB.message_blocks[].createdAt',
+      'indexedDB.message_blocks[].toolId',
+      'indexedDB.topics[].messages[].createdAt',
+      'indexedDB.topics[].messages[].blocks[]',
+    ],
+  },
+  sqlite: {
+    'rikka_hub.db': {
+      ignoreColumns: {
+        ConversationEntity: ['create_at', 'update_at'],
+        managed_files: ['created_at', 'updated_at'],
+        message_node: ['id'],
+      },
+      stripMessageFields: ['id'],
+    },
+  },
+};

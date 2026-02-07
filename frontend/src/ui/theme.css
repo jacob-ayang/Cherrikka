@@ -76,7 +76,9 @@ body,
 
 .panel {
   border: 1px solid var(--line-soft);
-  background: linear-gradient(180deg, #161616f5, #0f0f0ff5);
+  background:
+    linear-gradient(180deg, #1a1a1af2, #101010f2),
+    linear-gradient(135deg, #ffffff05 0%, #00000000 45%);
   padding: 12px;
   min-height: 90px;
 }
@@ -103,11 +105,25 @@ body,
   padding: 8px;
 }
 
+.drop-zone {
+  display: grid;
+  gap: 8px;
+  border: 1px dashed var(--line);
+  padding: 10px;
+  background: linear-gradient(180deg, #101010, #0d0d0d);
+}
+
+.drop-zone-active {
+  border-color: #adadad;
+  background: linear-gradient(180deg, #1f1f1f, #141414);
+}
+
 .file-name {
   margin-top: 8px;
   color: var(--fg-1);
   font-size: 10px;
   word-break: break-all;
+  line-height: 1.5;
 }
 
 .format-row,
@@ -184,12 +200,17 @@ body,
   margin-top: 8px;
   font-size: 10px;
   color: var(--fg-2);
-  min-height: 26px;
+  min-height: 48px;
+  border: 1px solid var(--line-soft);
+  background: #0f0f0f;
+  padding: 8px;
+  white-space: pre-wrap;
 }
 
 .result-header {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
   margin-bottom: 8px;
 }
 
@@ -202,6 +223,14 @@ body,
   padding: 8px;
   max-height: 360px;
   overflow: auto;
+}
+
+.result-list {
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--fg-1);
+  margin-bottom: 8px;
+  word-break: break-word;
 }
 
 @media (max-width: 860px) {

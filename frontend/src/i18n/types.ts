@@ -3,8 +3,16 @@ export type AppLang = 'zh' | 'en';
 export interface I18nText {
   appTitle: string;
   appSubtitle: string;
+  sectionSource: string;
+  sectionDirection: string;
+  sectionOptions: string;
+  sectionProgress: string;
+  sectionResult: string;
   sourceFileLabel: string;
   sourceFileHint: string;
+  sourceDropHint: string;
+  sourceFileNone: string;
+  sourceFileSelected: string;
   sourceFormat: string;
   sourceFormatAuto: string;
   sourceFormatCherry: string;
@@ -19,9 +27,19 @@ export interface I18nText {
   download: string;
   detectSource: string;
   progress: string;
+  progressLog: string;
   statusIdle: string;
   statusDone: string;
   statusFailed: string;
+  statusRunning: string;
+  warningPrefix: string;
   errorPrefix: string;
+  copyJson: string;
+  copyDone: string;
+  convertWarnings: string;
+  convertErrors: string;
+  noSourceFile: string;
+  unresolvedTarget: string;
+  detectFailed: string;
   language: string;
 }

@@ -4,9 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "check:legacy": "node scripts/check_no_legacy_imports.js",
     "dev": "vite",
+    "prebuild": "npm run check:legacy",
     "build": "vite build",
     "preview": "vite preview",
+    "pretest": "npm run check:legacy",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test"

@@ -20,17 +20,17 @@ export async function convert(request: ConvertRequest, pushProgress?: ProgressSi
 
   report(pushProgress, 'detect', 10, 'Detecting source format');
   const detected = detectFormat(sourceEntries);
-  if (detected.format === 'unknown') {
+  if (detected.sourceFormat === 'unknown') {
     throw new Error('cannot detect source backup format');
   }
 
-  if (request.from !== 'auto' && request.from !== detected.format) {
-    throw new Error(`source format mismatch: detected=${detected.format}, selected=${request.from}`);
+  if (request.from !== 'auto' && request.from !== detected.sourceFormat) {
+    throw new Error(`source format mismatch: detected=${detected.sourceFormat}, selected=${request.from}`);
   }
 
-  report(pushProgress, 'parse', 24, `Parsing ${detected.format} backup`);
+  report(pushProgress, 'parse', 24, `Parsing ${detected.sourceFormat} backup`);
   let ir: BackupIR;
-  if (detected.format === 'cherry') {
+  if (detected.sourceFormat === 'cherry') {
     ir = parseCherry(sourceEntries);
   } else {
     ir = await parseRikka(sourceEntries);
@@ -61,7 +61,7 @@ export async function convert(request: ConvertRequest, pushProgress?: ProgressSi
   const manifest: Manifest = {
     schemaVersion: 1,
     sourceApp: ir.sourceApp,
-    sourceFormat: detected.format,
+    sourceFormat: detected.sourceFormat,
     sourceSha256: sourceSha,
     targetApp: request.to === 'cherry' ? 'cherry-studio' : 'rikkahub',
     targetFormat: request.to,
@@ -78,14 +78,25 @@ export async function convert(request: ConvertRequest, pushProgress?: ProgressSi
   report(pushProgress, 'pack', 94, 'Packing zip');
   const outputBlob = await writeZipBlob(outputEntries);
 
+  if (manifest.warnings.length > 0) {
+    report(pushProgress, 'warn', 97, `${manifest.warnings.length} warning(s) generated`, 'warning');
+  }
   report(pushProgress, 'done', 100, 'Done');
   return {
     outputBlob,
     outputName: `converted-${request.to}-${Date.now()}.zip`,
     manifest,
+    warnings: manifest.warnings,
+    errors: [],
   };
 }
 
-function report(pushProgress: ProgressSink | undefined, stage: string, progress: number, message: string): void {
-  pushProgress?.({ stage, progress, message });
+function report(
+  pushProgress: ProgressSink | undefined,
+  stage: string,
+  progress: number,
+  message: string,
+  level: ProgressEvent['level'] = 'info',
+): void {
+  pushProgress?.({ stage, progress, message, level });
 }

@@ -2,16 +2,20 @@ export type BackupFormat = 'cherry' | 'rikka';
 export type SourceFormat = 'auto' | BackupFormat;
 export type TargetFormat = BackupFormat;
 export type DetectResultFormat = BackupFormat | 'unknown';
+export type ProgressLevel = 'info' | 'warning' | 'error';
 
 export interface ProgressEvent {
   stage: string;
   progress: number;
   message: string;
+  level: ProgressLevel;
 }
 
 export interface DetectResult {
-  format: DetectResultFormat;
+  sourceFormat: DetectResultFormat;
+  targetFormat: TargetFormat | null;
   hints: string[];
+  warnings: string[];
 }
 
 export interface ConvertRequest {
@@ -38,6 +42,8 @@ export interface ConvertResult {
   outputBlob: Blob;
   outputName: string;
   manifest: Manifest;
+  warnings: string[];
+  errors: string[];
 }
 
 export interface BackupIR {

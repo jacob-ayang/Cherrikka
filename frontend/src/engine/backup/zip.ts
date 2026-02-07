@@ -1,4 +1,5 @@
 import { BlobReader, BlobWriter, TextReader, Uint8ArrayReader, Uint8ArrayWriter, ZipReader, ZipWriter } from '@zip.js/zip.js';
+import { marshalGoJSON } from '../util/go_json';
 
 export async function readZipBlob(input: Blob): Promise<Map<string, Uint8Array>> {
   const out = new Map<string, Uint8Array>();
@@ -40,7 +41,7 @@ export function readJsonEntry<T>(entries: Map<string, Uint8Array>, path: string)
 }
 
 export function writeJsonEntry(entries: Map<string, Uint8Array>, path: string, value: unknown): void {
-  const text = JSON.stringify(value);
+  const text = marshalGoJSON(value);
   entries.set(path, new TextEncoder().encode(text));
 }
 

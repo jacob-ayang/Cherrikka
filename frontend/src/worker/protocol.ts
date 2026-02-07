@@ -6,14 +6,10 @@ export interface DetectPayload {
   file: File;
 }
 
-export interface ConvertPayload {
-  request: ConvertRequest;
-}
-
 export interface WorkerRequestEnvelope {
   id: string;
   command: WorkerCommand;
-  payload: DetectPayload | ConvertPayload;
+  payload: DetectPayload | ConvertRequest;
 }
 
 export interface WorkerSuccessEnvelope {

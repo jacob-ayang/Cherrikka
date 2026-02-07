@@ -15,6 +15,8 @@ interface AppState {
   sourceFile: File | null;
   sourceFormat: SourceFormat;
   detectedFormat: DetectResultFormat;
+  detectedHints: string[];
+  detectedWarnings: string[];
   redactSecrets: boolean;
   busy: boolean;
 }
@@ -27,6 +29,8 @@ export function mountApp(container: HTMLElement): void {
     sourceFile: null,
     sourceFormat: 'auto',
     detectedFormat: 'unknown',
+    detectedHints: [],
+    detectedWarnings: [],
     redactSecrets: false,
     busy: false,
   };
@@ -70,10 +74,7 @@ export function mountApp(container: HTMLElement): void {
     const progress = createProgressPanel(text);
     const result = createResultPanel(text);
 
-    const selected = document.createElement('div');
-    selected.className = 'file-name';
-    selected.textContent = state.sourceFile ? `${text.detectSource}: ${state.sourceFile.name}` : '';
-    upload.root.appendChild(selected);
+    updateSelectedMeta(upload.fileMeta, state, text);
 
     format.sourceSelect.value = state.sourceFormat;
     format.setTarget(resolveTargetFormat(state.sourceFormat, state.detectedFormat));
@@ -81,43 +82,65 @@ export function mountApp(container: HTMLElement): void {
     actions.redactInput.checked = state.redactSecrets;
     actions.setBusy(state.busy);
 
-    upload.fileInput.addEventListener('change', async () => {
-      state.sourceFile = upload.fileInput.files?.[0] ?? null;
+    const applySelectedFile = async (file: File | null) => {
+      state.sourceFile = file;
       state.detectedFormat = 'unknown';
-      selected.textContent = state.sourceFile ? `${text.detectSource}: ${state.sourceFile.name}` : '';
+      state.detectedHints = [];
+      state.detectedWarnings = [];
+      updateSelectedMeta(upload.fileMeta, state, text);
       result.clear();
 
       if (state.sourceFile && state.sourceFormat === 'auto') {
-        try {
-          const detected = await worker.detect(state.sourceFile);
-          state.detectedFormat = detected.format;
-        } catch {
-          state.detectedFormat = 'unknown';
-        }
+        await detectAndStore(state, state.sourceFile, text);
       }
-
       format.setTarget(resolveTargetFormat(state.sourceFormat, state.detectedFormat));
+      updateSelectedMeta(upload.fileMeta, state, text);
+    };
+
+    upload.fileInput.addEventListener('change', async () => {
+      await applySelectedFile(upload.fileInput.files?.[0] ?? null);
+    });
+
+    upload.dropZone.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      if (state.busy) return;
+      upload.dropZone.classList.add('drop-zone-active');
+    });
+    upload.dropZone.addEventListener('dragleave', () => {
+      upload.dropZone.classList.remove('drop-zone-active');
+    });
+    upload.dropZone.addEventListener('drop', async (event) => {
+      event.preventDefault();
+      upload.dropZone.classList.remove('drop-zone-active');
+      if (state.busy) return;
+      const file = event.dataTransfer?.files?.[0] ?? null;
+      if (!file) return;
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      upload.fileInput.files = dt.files;
+      await applySelectedFile(file);
     });
 
     format.sourceSelect.addEventListener('change', async () => {
       state.sourceFormat = format.sourceSelect.value as SourceFormat;
       if (state.sourceFormat !== 'auto') {
         state.detectedFormat = state.sourceFormat;
+        state.detectedHints = [];
+        state.detectedWarnings = [];
         format.setTarget(resolveTargetFormat(state.sourceFormat, state.detectedFormat));
+        updateSelectedMeta(upload.fileMeta, state, text);
         return;
       }
 
       if (state.sourceFile) {
-        try {
-          const detected = await worker.detect(state.sourceFile);
-          state.detectedFormat = detected.format;
-        } catch {
-          state.detectedFormat = 'unknown';
-        }
+        await detectAndStore(state, state.sourceFile, text);
       } else {
         state.detectedFormat = 'unknown';
+        state.detectedHints = [];
+        state.detectedWarnings = [];
       }
       format.setTarget(resolveTargetFormat(state.sourceFormat, state.detectedFormat));
+      updateSelectedMeta(upload.fileMeta, state, text);
     });
 
     actions.redactInput.addEventListener('change', () => {
@@ -126,13 +149,13 @@ export function mountApp(container: HTMLElement): void {
 
     actions.convertButton.addEventListener('click', async () => {
       if (!state.sourceFile) {
-        progress.setError('no source file selected');
+        progress.setError(text.noSourceFile);
         return;
       }
 
       const target = resolveTargetFormat(state.sourceFormat, state.detectedFormat);
       if (!target) {
-        progress.setError('unable to determine target format');
+        progress.setError(text.unresolvedTarget);
         return;
       }
 
@@ -144,16 +167,20 @@ export function mountApp(container: HTMLElement): void {
       try {
         const converted = await worker.convert(
           {
-            request: {
-              inputFile: state.sourceFile,
-              from: state.sourceFormat,
-              to: target,
-              redactSecrets: state.redactSecrets,
-            },
+            inputFile: state.sourceFile,
+            from: state.sourceFormat,
+            to: target,
+            redactSecrets: state.redactSecrets,
           },
           (event) => progress.setEvent(event),
         );
-        result.setResult(converted.outputBlob, converted.outputName, converted.manifest);
+        result.setResult(
+          converted.outputBlob,
+          converted.outputName,
+          converted.manifest,
+          converted.warnings,
+          converted.errors,
+        );
         progress.setDone();
       } catch (error) {
         progress.setError(error instanceof Error ? error.message : String(error));
@@ -169,6 +196,39 @@ export function mountApp(container: HTMLElement): void {
   };
 
   render();
+}
+
+async function detectAndStore(state: AppState, file: File, text: I18nText): Promise<void> {
+  try {
+    const detected = await worker.detect(file);
+    state.detectedFormat = detected.sourceFormat;
+    state.detectedHints = detected.hints;
+    state.detectedWarnings = detected.warnings;
+  } catch {
+    state.detectedFormat = 'unknown';
+    state.detectedHints = [];
+    state.detectedWarnings = [text.detectFailed];
+  }
+}
+
+function updateSelectedMeta(target: HTMLElement, state: AppState, text: I18nText): void {
+  if (!state.sourceFile) {
+    target.textContent = text.sourceFileNone;
+    return;
+  }
+
+  const kb = Math.max(1, Math.round(state.sourceFile.size / 1024));
+  const pieces = [
+    `${text.sourceFileSelected}: ${state.sourceFile.name} (${kb} KB)`,
+    `${text.detectSource}: ${state.detectedFormat}`,
+  ];
+  if (state.detectedHints.length > 0) {
+    pieces.push(`hints=${state.detectedHints.join(', ')}`);
+  }
+  if (state.detectedWarnings.length > 0) {
+    pieces.push(`warnings=${state.detectedWarnings.join(', ')}`);
+  }
+  target.textContent = pieces.join(' · ');
 }
 
 function detectInitialLang(): AppLang {

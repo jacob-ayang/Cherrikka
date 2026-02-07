@@ -1,6 +1,6 @@
 import { newId } from '../engine/util/id';
-import type { ConvertResult, DetectResult, ProgressEvent } from '../engine/ir/types';
-import type { ConvertPayload, DetectPayload, WorkerRequestEnvelope, WorkerResponseEnvelope } from '../worker/protocol';
+import type { ConvertRequest, ConvertResult, DetectResult, ProgressEvent } from '../engine/ir/types';
+import type { DetectPayload, WorkerRequestEnvelope, WorkerResponseEnvelope } from '../worker/protocol';
 
 type PendingItem = {
   resolve: (value: unknown) => void;
@@ -38,11 +38,8 @@ export class WorkerClient {
     return this.send<DetectResult>('detect', payload);
   }
 
-  async convert(
-    payload: ConvertPayload,
-    onProgress?: (event: ProgressEvent) => void,
-  ): Promise<ConvertResult> {
-    return this.send<ConvertResult>('convert', payload, onProgress);
+  async convert(request: ConvertRequest, onProgress?: (event: ProgressEvent) => void): Promise<ConvertResult> {
+    return this.send<ConvertResult>('convert', request, onProgress);
   }
 
   private send<T>(

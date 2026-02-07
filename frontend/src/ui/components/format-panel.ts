@@ -12,6 +12,10 @@ export function createFormatPanel(text: I18nText): FormatPanelHandle {
   const root = document.createElement('section');
   root.className = 'panel';
 
+  const title = document.createElement('h2');
+  title.className = 'panel-title';
+  title.textContent = text.sectionDirection;
+
   const row = document.createElement('div');
   row.className = 'format-row';
 
@@ -38,7 +42,7 @@ export function createFormatPanel(text: I18nText): FormatPanelHandle {
 
   targetLabel.appendChild(targetValue);
   row.append(sourceLabel, targetLabel);
-  root.appendChild(row);
+  root.append(title, row);
 
   const setTarget = (target: TargetFormat | null) => {
     if (!target) {

@@ -2,8 +2,9 @@ import { readJsonEntry, writeJsonEntry } from '../backup/zip';
 import type { BackupIR, IRConversation, IRFile, IRMessage, IRPart } from '../ir/types';
 import { asArray, asRecord, asString, cloneJson, dedupeStrings, nowIso, normalizeText, truncate } from '../util/common';
 import { extname, guessLogicalType, normalizePath } from '../util/file';
+import { marshalGoJSON } from '../util/go_json';
 import { sha256Hex } from '../util/hash';
-import { ensureUUID, newId } from '../util/id';
+import { ensureUUID, ensureUUIDUrl, newId } from '../util/id';
 
 interface CherryData {
   time?: number;
@@ -419,8 +420,10 @@ function materializeCherryFiles(
   const used = new Set<string>();
 
   for (const file of files) {
-    let fileId = asString(asRecord(file.metadata).cherry_id) || file.id;
-    if (!fileId || used.has(fileId)) fileId = newId();
+    let fileId = chooseCherryFileId(file);
+    if (!fileId || used.has(fileId)) {
+      fileId = ensureUUIDUrl('', `${deterministicCherryFileSeed(file)}#dup`);
+    }
     used.add(fileId);
 
     idMap[`file:${file.id}`] = fileId;
@@ -492,8 +495,11 @@ function buildCherryAssistants(assistants: BackupIR['assistants'], conversations
   }
 
   const source = assistants.length > 0 ? assistants : [{ id: newId(), name: 'Imported Assistant', prompt: '' }];
+  const usedNames = new Set<string>();
 
   return source.map((assistant, index) => {
+    const baseName = assistant.name || `Assistant ${index + 1}`;
+    const uniqueName = uniqueAssistantName(baseName, usedNames);
     const topics = (convMap.get(assistant.id) ?? []).map((conv) => ({
       id: conv.id,
       assistantId: assistant.id,
@@ -506,7 +512,7 @@ function buildCherryAssistants(assistants: BackupIR['assistants'], conversations
 
     return {
       id: assistant.id || newId(),
-      name: assistant.name || `Assistant ${index + 1}`,
+      name: uniqueName,
       prompt: assistant.prompt || '',
       topics,
       type: 'assistant',
@@ -526,10 +532,12 @@ function buildCherryLlm(ir: BackupIR): Record<string, unknown> {
   const rikka = asRecord(ir.config['rikka.settings']);
   const providers = asArray(rikka.providers).map((raw) => {
     const provider = asRecord(raw);
+    const providerId = asString(provider.id) || newId();
+    const mappedType = mapProviderTypeToCherry(asString(provider.type));
     return {
-      id: asString(provider.id) || newId(),
+      id: providerId,
       name: asString(provider.name) || 'Imported Provider',
-      type: asString(provider.type) || 'openai',
+      type: mappedType,
       apiHost: asString(provider.baseUrl),
       baseUrl: asString(provider.baseUrl),
       enabled: provider.enabled !== false,
@@ -541,7 +549,7 @@ function buildCherryLlm(ir: BackupIR): Record<string, unknown> {
           modelId: asString(m.modelId) || id,
           name: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
           displayName: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
-          provider: asString(provider.id),
+          provider: providerId,
           group: 'default',
           type: 'CHAT',
         };
@@ -550,8 +558,7 @@ function buildCherryLlm(ir: BackupIR): Record<string, unknown> {
   });
 
   const allModels = providers.flatMap((p) => asArray<Record<string, unknown>>(p.models));
-  const selectedId = asString(rikka.chatModelId) || asString(allModels[0]?.id);
-  const selected = allModels.find((m) => asString(m.id) === selectedId) ?? allModels[0] ?? {
+  const fallbackModel = allModels[0] ?? {
     id: 'default-model',
     modelId: 'gpt-4o-mini',
     name: 'gpt-4o-mini',
@@ -560,13 +567,17 @@ function buildCherryLlm(ir: BackupIR): Record<string, unknown> {
     group: 'default',
     type: 'CHAT',
   };
+  const defaultModel = pickRikkaSelectionModel(allModels, asString(rikka.chatModelId), fallbackModel);
+  const quickModel = pickRikkaSelectionModel(allModels, asString(rikka.suggestionModelId), defaultModel);
+  const translateModel = pickRikkaSelectionModel(allModels, asString(rikka.translateModeId), defaultModel);
+  const topicNamingModel = pickRikkaSelectionModel(allModels, asString(rikka.titleModelId), defaultModel);
 
   return {
     providers,
-    defaultModel: selected,
-    quickModel: selected,
-    translateModel: selected,
-    topicNamingModel: selected,
+    defaultModel,
+    quickModel,
+    translateModel,
+    topicNamingModel,
   };
 }
 
@@ -595,9 +606,9 @@ function decodePersistSlices(payload: string): Record<string, unknown> {
 function encodePersistSlices(slices: Record<string, unknown>): string {
   const outer: Record<string, string> = {};
   for (const [k, v] of Object.entries(slices)) {
-    outer[k] = JSON.stringify(v);
+    outer[k] = marshalGoJSON(v);
   }
-  return JSON.stringify(outer);
+  return marshalGoJSON(outer);
 }
 
 function normalizeRole(role: string): string {
@@ -665,6 +676,58 @@ function ensureKeepFile(entries: Map<string, Uint8Array>): void {
   if (!hasFile) {
     entries.set('Data/Files/.keep', new Uint8Array());
   }
+}
+
+function chooseCherryFileId(file: IRFile): string {
+  const metadata = asRecord(file.metadata);
+  const fromMeta = asString(metadata.cherry_id);
+  if (isSafeFileStem(fromMeta)) return fromMeta;
+  if (isSafeFileStem(file.id)) return file.id;
+  return ensureUUIDUrl('', deterministicCherryFileSeed(file));
+}
+
+function isSafeFileStem(value: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+function deterministicCherryFileSeed(file: IRFile): string {
+  const seed = [file.id.trim(), file.name.trim(), file.ext.trim(), file.relativeSrc.trim(), file.hashSha256.trim()].join('|');
+  return seed || 'cherrikka:file:unknown';
+}
+
+function uniqueAssistantName(name: string, used: Set<string>): string {
+  const clean = normalizeText(name) || 'Imported Assistant';
+  if (!used.has(clean)) {
+    used.add(clean);
+    return clean;
+  }
+  let index = 2;
+  let candidate = `${clean} (${index})`;
+  while (used.has(candidate)) {
+    index += 1;
+    candidate = `${clean} (${index})`;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+function mapProviderTypeToCherry(rawType: string): string {
+  const clean = rawType.trim().toLowerCase();
+  if (clean === 'claude' || clean === 'anthropic' || clean === 'vertex-anthropic') return 'anthropic';
+  if (clean === 'google' || clean === 'gemini' || clean === 'vertexai') return 'gemini';
+  return 'openai';
+}
+
+function pickRikkaSelectionModel(
+  models: Record<string, unknown>[],
+  selectedId: string,
+  fallbackModel: Record<string, unknown>,
+): Record<string, unknown> {
+  if (selectedId) {
+    const selected = models.find((model) => asString(model.id) === selectedId || asString(model.modelId) === selectedId);
+    if (selected) return selected;
+  }
+  return fallbackModel;
 }
 
 function extractIndexedDbExtra(indexedDb: Record<string, unknown>): Record<string, unknown> {

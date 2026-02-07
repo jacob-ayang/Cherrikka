@@ -11,6 +11,10 @@ export function createActionPanel(text: I18nText): ActionPanelHandle {
   const root = document.createElement('section');
   root.className = 'panel';
 
+  const title = document.createElement('h2');
+  title.className = 'panel-title';
+  title.textContent = text.sectionOptions;
+
   const row = document.createElement('div');
   row.className = 'action-row';
 
@@ -32,9 +36,10 @@ export function createActionPanel(text: I18nText): ActionPanelHandle {
   convertButton.textContent = text.convert;
 
   row.append(redactLabel, convertButton);
-  root.appendChild(row);
+  root.append(title, row);
 
   const setBusy = (busy: boolean) => {
+    redactInput.disabled = busy;
     convertButton.disabled = busy;
     convertButton.textContent = busy ? text.converting : text.convert;
   };

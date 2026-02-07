@@ -8,11 +8,28 @@ export function detectFormat(entries: Map<string, Uint8Array>): DetectResult {
   const hasDb = names.includes('rikka_hub.db');
   const hasUpload = names.some((n) => n.startsWith('upload/'));
 
-  if (hasDataJson && hasDataDir) return { format: 'cherry', hints: ['data.json', 'Data/'] };
+  if (hasDataJson && hasDataDir) {
+    return {
+      sourceFormat: 'cherry',
+      targetFormat: 'rikka',
+      hints: ['data.json', 'Data/'],
+      warnings: [],
+    };
+  }
   if (hasSettings && hasDb) {
     const hints = ['settings.json', 'rikka_hub.db'];
     if (hasUpload) hints.push('upload/');
-    return { format: 'rikka', hints };
+    return {
+      sourceFormat: 'rikka',
+      targetFormat: 'cherry',
+      hints,
+      warnings: [],
+    };
   }
-  return { format: 'unknown', hints: [] };
+  return {
+    sourceFormat: 'unknown',
+    targetFormat: null,
+    hints: [],
+    warnings: ['unknown backup structure'],
+  };
 }
