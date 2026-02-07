@@ -17,6 +17,7 @@
   --progress-b: #d5dbe6;
   --noise: #ffffff07;
   --theme-shadow: #00000070;
+  --input-height: 26px;
 }
 
 body[data-theme='dark'] {
@@ -64,7 +65,7 @@ body,
 }
 
 .shell {
-  width: min(1040px, 100%);
+  width: min(880px, 100%);
   margin: 0 auto;
   padding: 10px;
   display: grid;
@@ -87,25 +88,27 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   border: 1px solid var(--line-strong);
   background:
     linear-gradient(180deg, #ffffff11 0%, #00000000 42%),
     linear-gradient(180deg, var(--surface) 0%, var(--surface-soft) 100%);
-  padding: 8px 10px;
+  padding: 7px 9px;
   box-shadow: inset 0 1px 0 #ffffff14;
+  height: 36px;
 }
 
 .app-brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
+  flex: 1;
 }
 
 .app-icon {
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   border: 1px solid var(--line-strong);
   background: var(--bg-0);
   image-rendering: pixelated;
@@ -125,31 +128,35 @@ body,
 }
 
 .subtitle {
-  margin: 3px 0 0;
+  margin: 2px 0 0;
   color: var(--text-2);
-  font-size: 8px;
-  line-height: 1.4;
+  font-size: 7px;
+  line-height: 1.3;
+  display: none;
 }
 
 .top-controls {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  gap: 5px;
+  flex-wrap: nowrap;
   justify-content: flex-end;
+  flex: 0 1 auto;
 }
 
 .control-label {
-  font-size: 8px;
+  font-size: 7px;
   color: var(--text-2);
-  letter-spacing: 0.07em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .theme-toggle {
   display: inline-flex;
   border: 1px solid var(--line);
   background: var(--input-bg);
+  height: 22px;
 }
 
 .theme-btn {
@@ -158,10 +165,12 @@ body,
   background: transparent;
   color: var(--text-2);
   font: inherit;
-  font-size: 8px;
-  padding: 5px 7px;
+  font-size: 7px;
+  padding: 3px 5px;
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
+  display: flex;
+  align-items: center;
 }
 
 .theme-btn:last-child {
@@ -178,9 +187,13 @@ body,
   background: linear-gradient(180deg, #ffffff1b, #00000000), var(--surface-raised);
   color: var(--text-0);
   font: inherit;
-  font-size: 8px;
-  padding: 5px 7px;
+  font-size: 7px;
+  padding: 3px 5px;
   cursor: pointer;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
 }
 
 .grid {
@@ -201,8 +214,9 @@ body,
   background:
     linear-gradient(180deg, #ffffff0c 0%, #00000000 42%),
     linear-gradient(180deg, var(--surface) 0%, var(--surface-soft) 100%);
-  padding: 8px;
-  min-height: 68px;
+  padding: 7px;
+  display: flex;
+  flex-direction: column;
   box-shadow: inset 0 1px 0 #ffffff12;
 }
 
@@ -218,22 +232,27 @@ body,
 
 .panel-source {
   grid-area: source;
+  min-height: 88px;
 }
 
 .panel-direction {
   grid-area: direction;
+  min-height: 88px;
 }
 
 .panel-options {
   grid-area: options;
+  min-height: 70px;
 }
 
 .panel-progress {
   grid-area: progress;
+  min-height: 70px;
 }
 
 .panel-result {
   grid-area: result;
+  min-height: 170px;
 }
 
 .panel-title {
@@ -259,8 +278,11 @@ body,
   background: var(--input-bg);
   color: var(--text-0);
   font: inherit;
-  font-size: 9px;
-  padding: 5px 7px;
+  font-size: 8px;
+  padding: 4px 6px;
+  height: var(--input-height);
+  display: flex;
+  align-items: center;
 }
 
 .file-input::file-selector-button {
@@ -268,18 +290,21 @@ body,
   background: linear-gradient(180deg, #ffffff20, #00000000), var(--surface-raised);
   color: var(--text-0);
   font: inherit;
-  font-size: 9px;
-  padding: 4px 7px;
-  margin-right: 8px;
+  font-size: 7px;
+  padding: 2px 5px;
+  margin-right: 5px;
   cursor: pointer;
 }
 
 .drop-zone {
   display: grid;
-  gap: 5px;
+  gap: 4px;
   border: 1px dashed var(--line);
-  padding: 6px;
+  padding: 5px;
   background: linear-gradient(180deg, #ffffff09, #00000000), var(--input-bg);
+  flex: 1;
+  min-height: 40px;
+  place-items: center;
 }
 
 .drop-zone-active {
@@ -288,18 +313,19 @@ body,
 }
 
 .file-name {
-  margin-top: 1px;
+  margin: 0;
   color: var(--text-1);
-  font-size: 8px;
+  font-size: 7px;
   word-break: break-all;
-  line-height: 1.4;
+  line-height: 1.3;
 }
 
 .format-row,
 .action-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
+  gap: 6px;
+  flex: 1;
 }
 
 .field {
@@ -353,6 +379,11 @@ body,
   pointer-events: none;
 }
 
+.btn-primary:hover:not(:disabled),
+.btn-secondary:hover:not(.disabled) {
+  background: linear-gradient(180deg, #ffffff2d, #00000000), var(--surface-raised);
+}
+
 .status {8px;
   color: var(--text-1);
   margin-bottom: 5px;
@@ -363,14 +394,17 @@ body,
 .progress-bar {
   border: 1px solid var(--line);
   backgrou9: var(--input-bg);
-  height: 11px;
+  height: 9px;
   overflow: hidden;
+  flex: 0 0 auto;
+  margin: 2px 0;
 }
 
 .progress-fill {
   height: 100%;
   width: 0;
   background: linear-gradient(90deg, var(--progress-a), var(--progress-b));
+  transition: width 150ms ease;
 }
 
 .log {
@@ -408,11 +442,12 @@ body,
 }
 
 .result-list {
-  font-size: 8px;
-  line-height: 1.5;
+  font-size: 7px;
+  line-height: 1.4;
   color: var(--text-1);
-  margin-bottom: 4px;
+  margin: 0 0 3px;
   word-break: break-word;
+  flex: 0 0 auto;
 }
 
 @media (max-width: 980px) {
@@ -430,24 +465,41 @@ body,
 @media (max-width: 760px) {
   .shell {
     padding: 8px;
-    gap: 6px;
+    gap: 8px;
   }
 
   .topbar {
-    align-items: flex-start;
+    height: auto;
     flex-direction: column;
+    align-items: flex-start;
     padding: 6px 8px;
+  }
+
+  .app-brand {
+    width: 100%;
+  }
+
+  .subtitle {
+    display: block;
   }
 
   .top-controls {
     width: 100%;
-    justify-content: space-between;
-    gap: 6px;
+    flex-wrap: wrap;
+    gap: 5px;
   }
 
   .format-row,
   .action-row {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+
+  .panel-source,
+  .panel-direction,
+  .panel-options,
+  .panel-progress {
+    min-height: auto;
+    min-height: 65px;
   }
 }
