@@ -17,7 +17,7 @@
   --progress-b: #d5dbe6;
   --noise: #ffffff07;
   --theme-shadow: #00000070;
-  --input-height: 26px;
+  --input-height: 24px;
 }
 
 body[data-theme='dark'] {
@@ -67,9 +67,9 @@ body,
 .shell {
   width: min(880px, 100%);
   margin: 0 auto;
-  padding: 10px;
+  padding: 8px;
   display: grid;
-  gap: 8px;
+  gap: 6px;
   min-height: 100vh;
 }
 
@@ -88,27 +88,27 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   border: 1px solid var(--line-strong);
   background:
     linear-gradient(180deg, #ffffff11 0%, #00000000 42%),
     linear-gradient(180deg, var(--surface) 0%, var(--surface-soft) 100%);
-  padding: 7px 9px;
+  padding: 5px 8px;
   box-shadow: inset 0 1px 0 #ffffff14;
-  height: 36px;
+  height: 28px;
 }
 
 .app-brand {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 5px;
   min-width: 0;
   flex: 1;
 }
 
 .app-icon {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   border: 1px solid var(--line-strong);
   background: var(--bg-0);
   image-rendering: pixelated;
@@ -118,13 +118,14 @@ body,
 
 .title {
   margin: 0;
-  font-size: 12px;
-  letter-spacing: 0.07em;
+  font-size: 11px;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 600;
+  line-height: 1;
 }
 
 .subtitle {
@@ -138,7 +139,7 @@ body,
 .top-controls {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   flex-wrap: nowrap;
   justify-content: flex-end;
   flex: 0 1 auto;
@@ -156,7 +157,7 @@ body,
   display: inline-flex;
   border: 1px solid var(--line);
   background: var(--input-bg);
-  height: 22px;
+  height: 20px;
 }
 
 .theme-btn {
@@ -166,7 +167,7 @@ body,
   color: var(--text-2);
   font: inherit;
   font-size: 7px;
-  padding: 3px 5px;
+  padding: 2px 4px;
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
   display: flex;
@@ -188,9 +189,9 @@ body,
   color: var(--text-0);
   font: inherit;
   font-size: 7px;
-  padding: 3px 5px;
+  padding: 2px 4px;
   cursor: pointer;
-  height: 22px;
+  height: 20px;
   display: flex;
   align-items: center;
   white-space: nowrap;
@@ -205,7 +206,7 @@ body,
     'source direction'
     'options progress'
     'result result';
-  gap: 8px;
+  gap: 6px;
 }
 
 .panel {
@@ -232,27 +233,27 @@ body,
 
 .panel-source {
   grid-area: source;
-  min-height: 88px;
+  min-height: 78px;
 }
 
 .panel-direction {
   grid-area: direction;
-  min-height: 88px;
+  min-height: 78px;
 }
 
 .panel-options {
   grid-area: options;
-  min-height: 70px;
+  min-height: 62px;
 }
 
 .panel-progress {
   grid-area: progress;
-  min-height: 70px;
+  min-height: 62px;
 }
 
 .panel-result {
   grid-area: result;
-  min-height: 170px;
+  min-height: 150px;
 }
 
 .panel-title {
