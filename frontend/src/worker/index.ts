@@ -1,43 +1,34 @@
 /// <reference lib="webworker" />
 
-import type { WorkerRequestEnvelope, WorkerResponseEnvelope } from './protocol';
 import { runTask } from './tasks';
+import type { WorkerProgressEnvelope, WorkerRequestEnvelope, WorkerResponseEnvelope } from './protocol';
 
-const scope: DedicatedWorkerGlobalScope = self as DedicatedWorkerGlobalScope;
-
-scope.onmessage = async (event: MessageEvent<WorkerRequestEnvelope>) => {
+self.onmessage = async (event: MessageEvent<WorkerRequestEnvelope>) => {
   const request = event.data;
-  if (!request || !request.requestId || !request.command) {
-    return;
-  }
 
-  const pushProgress = (stage: string, progress: number, message: string): void => {
-    const envelope: WorkerResponseEnvelope = {
-      requestId: request.requestId,
-      kind: 'progress',
-      event: {
-        stage,
-        progress,
-        message,
-      },
+  const pushProgress = (progress: WorkerProgressEnvelope['event']) => {
+    const packet: WorkerProgressEnvelope = {
+      id: request.id,
+      type: 'progress',
+      event: progress,
     };
-    scope.postMessage(envelope);
+    self.postMessage(packet);
   };
 
   try {
-    const result = await runTask(request.command, request.payload, (p) => {
-      pushProgress(p.stage, p.progress, p.message ?? '');
-    });
-    scope.postMessage({
-      requestId: request.requestId,
+    const result = await runTask(request.command, request.payload, pushProgress);
+    const response: WorkerResponseEnvelope = {
+      id: request.id,
       ok: true,
-      result,
-    } satisfies WorkerResponseEnvelope);
+      result: result as never,
+    };
+    self.postMessage(response);
   } catch (error) {
-    scope.postMessage({
-      requestId: request.requestId,
+    const response: WorkerResponseEnvelope = {
+      id: request.id,
       ok: false,
       error: error instanceof Error ? error.message : String(error),
-    } satisfies WorkerResponseEnvelope);
+    };
+    self.postMessage(response);
   }
 };

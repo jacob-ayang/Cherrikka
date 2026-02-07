@@ -1,269 +1,181 @@
-import type {
-  ConvertRequest,
-  ConvertResult,
-  InspectResult,
-  ProgressEvent,
-  ValidateResult,
-} from '../engine/ir/types';
-import type {
-  WorkerCommand,
-  WorkerProgressEnvelope,
-  WorkerRequestEnvelope,
-  WorkerResponseEnvelope,
-} from '../worker/protocol';
+import type { DetectResultFormat, SourceFormat } from '../engine/ir/types';
+import { resolveTargetFormat } from '../lib/format';
+import { WorkerClient } from '../lib/worker-client';
+import { en } from '../i18n/en';
+import { zh } from '../i18n/zh';
+import type { AppLang, I18nText } from '../i18n/types';
 import { createActionPanel } from './components/action-panel';
-import { createInputPanel } from './components/input-panel';
+import { createFormatPanel } from './components/format-panel';
+import { createProgressPanel } from './components/progress-panel';
 import { createResultPanel } from './components/result-panel';
+import { createUploadPanel } from './components/upload-panel';
 
-type PendingRequest = {
-  resolve: (value: unknown) => void;
-  reject: (reason?: unknown) => void;
-  onProgress?: (event: ProgressEvent) => void;
-};
-
-const worker = new Worker(new URL('../worker/index.ts', import.meta.url), { type: 'module' });
-const pending = new Map<string, PendingRequest>();
-const logLines: string[] = [];
-
-export function mountApp(root: HTMLElement): void {
-  root.innerHTML = '';
-
-  const shell = document.createElement('main');
-  shell.className = 'tui-shell';
-  shell.innerHTML = `
-    <h1 class="tui-title">CHERRIKKA LOCAL CONVERTER</h1>
-    <p class="tui-subtitle">
-      CHERRY STUDIO ↔ RIKKAHUB BACKUP CONVERTER. PURE FRONTEND, LOCAL WORKER, NO SERVER API.
-    </p>
-    <div id="tui-grid" class="tui-grid"></div>
-  `;
-  root.appendChild(shell);
-
-  const grid = must<HTMLDivElement>(shell, '#tui-grid');
-  const inputPanel = createInputPanel();
-  const actionPanel = createActionPanel();
-  grid.appendChild(inputPanel.root);
-  grid.appendChild(actionPanel.root);
-
-  const resultPanel = createResultPanel();
-  shell.appendChild(resultPanel.root);
-
-  worker.addEventListener('message', (event: MessageEvent<WorkerResponseEnvelope>) => {
-    const envelope = event.data;
-    const pendingItem = pending.get(envelope.requestId);
-    if (!pendingItem) {
-      return;
-    }
-    if ('kind' in envelope && envelope.kind === 'progress') {
-      const progressEnvelope = envelope as WorkerProgressEnvelope;
-      pendingItem.onProgress?.(progressEnvelope.event);
-      return;
-    }
-
-    pending.delete(envelope.requestId);
-    if ('ok' in envelope && envelope.ok) {
-      pendingItem.resolve(envelope.result);
-      return;
-    }
-    if ('ok' in envelope && !envelope.ok) {
-      pendingItem.reject(new Error(envelope.error));
-    }
-  });
-
-  actionPanel.refs.inspectButton.addEventListener('click', async () => {
-    const source = inputPanel.refs.sourceFile.files?.[0];
-    if (!source) {
-      setError('SOURCE ZIP IS REQUIRED', resultPanel.refs.output, actionPanel.refs);
-      return;
-    }
-    try {
-      await withBusy(actionPanel.refs, async () => {
-        const result = await sendWorker<InspectResult>('inspect', { file: source }, (p) => {
-          updateProgress(actionPanel.refs, p);
-        });
-        setResult(resultPanel.refs.output, result);
-      });
-    } catch (error) {
-      setError(toErr(error), resultPanel.refs.output, actionPanel.refs);
-    }
-  });
-
-  actionPanel.refs.validateButton.addEventListener('click', async () => {
-    const source = inputPanel.refs.sourceFile.files?.[0];
-    if (!source) {
-      setError('SOURCE ZIP IS REQUIRED', resultPanel.refs.output, actionPanel.refs);
-      return;
-    }
-    try {
-      await withBusy(actionPanel.refs, async () => {
-        const result = await sendWorker<ValidateResult>('validate', { file: source }, (p) => {
-          updateProgress(actionPanel.refs, p);
-        });
-        setResult(resultPanel.refs.output, result);
-      });
-    } catch (error) {
-      setError(toErr(error), resultPanel.refs.output, actionPanel.refs);
-    }
-  });
-
-  actionPanel.refs.convertButton.addEventListener('click', async () => {
-    const source = inputPanel.refs.sourceFile.files?.[0];
-    if (!source) {
-      setError('SOURCE ZIP IS REQUIRED', resultPanel.refs.output, actionPanel.refs);
-      return;
-    }
-    const request: ConvertRequest = {
-      inputFile: source,
-      templateFile: inputPanel.refs.templateFile.files?.[0],
-      from: inputPanel.refs.fromSelect.value as ConvertRequest['from'],
-      to: inputPanel.refs.toSelect.value as ConvertRequest['to'],
-      redactSecrets: inputPanel.refs.redactSecrets.checked,
-    };
-
-    try {
-      await withBusy(actionPanel.refs, async () => {
-        const result = await sendWorker<ConvertResult>('convert', { request }, (p) => {
-          updateProgress(actionPanel.refs, p);
-        });
-        const fileName = `converted-${request.to}-${Date.now()}.zip`;
-        downloadBlob(result.outputBlob, fileName);
-        setResult(resultPanel.refs.output, {
-          downloaded: true,
-          fileName,
-          manifest: result.manifest,
-        });
-      });
-    } catch (error) {
-      setError(toErr(error), resultPanel.refs.output, actionPanel.refs);
-    }
-  });
-
-  resultPanel.refs.clearButton.addEventListener('click', () => {
-    setResult(resultPanel.refs.output, {});
-    resetProgress(actionPanel.refs);
-  });
-
-  resultPanel.refs.copyButton.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(resultPanel.refs.output.textContent ?? '{}');
-      appendLog(actionPanel.refs.log, '[ok] copied result json');
-    } catch (error) {
-      appendLog(actionPanel.refs.log, `[error] copy failed: ${toErr(error)}`);
-    }
-  });
-
-  resetProgress(actionPanel.refs);
-  setResult(resultPanel.refs.output, {});
+interface AppState {
+  lang: AppLang;
+  sourceFile: File | null;
+  sourceFormat: SourceFormat;
+  detectedFormat: DetectResultFormat;
+  redactSecrets: boolean;
+  busy: boolean;
 }
 
-function sendWorker<T>(
-  command: WorkerCommand,
-  payload: unknown,
-  onProgress?: (event: ProgressEvent) => void,
-): Promise<T> {
-  const requestId = crypto.randomUUID();
-  const envelope: WorkerRequestEnvelope = {
-    requestId,
-    command,
-    payload,
+const worker = new WorkerClient();
+
+export function mountApp(container: HTMLElement): void {
+  const state: AppState = {
+    lang: detectInitialLang(),
+    sourceFile: null,
+    sourceFormat: 'auto',
+    detectedFormat: 'unknown',
+    redactSecrets: false,
+    busy: false,
   };
 
-  return new Promise<T>((resolve, reject) => {
-    pending.set(requestId, {
-      resolve: (value: unknown) => resolve(value as T),
-      reject,
-      onProgress,
+  const render = () => {
+    const text = i18n(state.lang);
+    container.innerHTML = '';
+
+    const shell = document.createElement('main');
+    shell.className = 'shell';
+
+    const topbar = document.createElement('header');
+    topbar.className = 'topbar';
+
+    const titleWrap = document.createElement('div');
+    const title = document.createElement('h1');
+    title.className = 'title';
+    title.textContent = text.appTitle;
+    const subtitle = document.createElement('p');
+    subtitle.className = 'subtitle';
+    subtitle.textContent = text.appSubtitle;
+    titleWrap.append(title, subtitle);
+
+    const langBtn = document.createElement('button');
+    langBtn.type = 'button';
+    langBtn.className = 'lang-toggle';
+    langBtn.textContent = `${text.language}: ${state.lang.toUpperCase()}`;
+    langBtn.addEventListener('click', () => {
+      state.lang = state.lang === 'zh' ? 'en' : 'zh';
+      render();
     });
-    worker.postMessage(envelope);
-  });
+
+    topbar.append(titleWrap, langBtn);
+
+    const grid = document.createElement('section');
+    grid.className = 'grid';
+
+    const upload = createUploadPanel(text);
+    const format = createFormatPanel(text);
+    const actions = createActionPanel(text);
+    const progress = createProgressPanel(text);
+    const result = createResultPanel(text);
+
+    const selected = document.createElement('div');
+    selected.className = 'file-name';
+    selected.textContent = state.sourceFile ? `${text.detectSource}: ${state.sourceFile.name}` : '';
+    upload.root.appendChild(selected);
+
+    format.sourceSelect.value = state.sourceFormat;
+    format.setTarget(resolveTargetFormat(state.sourceFormat, state.detectedFormat));
+
+    actions.redactInput.checked = state.redactSecrets;
+    actions.setBusy(state.busy);
+
+    upload.fileInput.addEventListener('change', async () => {
+      state.sourceFile = upload.fileInput.files?.[0] ?? null;
+      state.detectedFormat = 'unknown';
+      selected.textContent = state.sourceFile ? `${text.detectSource}: ${state.sourceFile.name}` : '';
+      result.clear();
+
+      if (state.sourceFile && state.sourceFormat === 'auto') {
+        try {
+          const detected = await worker.detect(state.sourceFile);
+          state.detectedFormat = detected.format;
+        } catch {
+          state.detectedFormat = 'unknown';
+        }
+      }
+
+      format.setTarget(resolveTargetFormat(state.sourceFormat, state.detectedFormat));
+    });
+
+    format.sourceSelect.addEventListener('change', async () => {
+      state.sourceFormat = format.sourceSelect.value as SourceFormat;
+      if (state.sourceFormat !== 'auto') {
+        state.detectedFormat = state.sourceFormat;
+        format.setTarget(resolveTargetFormat(state.sourceFormat, state.detectedFormat));
+        return;
+      }
+
+      if (state.sourceFile) {
+        try {
+          const detected = await worker.detect(state.sourceFile);
+          state.detectedFormat = detected.format;
+        } catch {
+          state.detectedFormat = 'unknown';
+        }
+      } else {
+        state.detectedFormat = 'unknown';
+      }
+      format.setTarget(resolveTargetFormat(state.sourceFormat, state.detectedFormat));
+    });
+
+    actions.redactInput.addEventListener('change', () => {
+      state.redactSecrets = actions.redactInput.checked;
+    });
+
+    actions.convertButton.addEventListener('click', async () => {
+      if (!state.sourceFile) {
+        progress.setError('no source file selected');
+        return;
+      }
+
+      const target = resolveTargetFormat(state.sourceFormat, state.detectedFormat);
+      if (!target) {
+        progress.setError('unable to determine target format');
+        return;
+      }
+
+      state.busy = true;
+      actions.setBusy(true);
+      result.clear();
+      progress.setIdle();
+
+      try {
+        const converted = await worker.convert(
+          {
+            request: {
+              inputFile: state.sourceFile,
+              from: state.sourceFormat,
+              to: target,
+              redactSecrets: state.redactSecrets,
+            },
+          },
+          (event) => progress.setEvent(event),
+        );
+        result.setResult(converted.outputBlob, converted.outputName, converted.manifest);
+        progress.setDone();
+      } catch (error) {
+        progress.setError(error instanceof Error ? error.message : String(error));
+      } finally {
+        state.busy = false;
+        actions.setBusy(false);
+      }
+    });
+
+    grid.append(upload.root, format.root, actions.root, progress.root, result.root);
+    shell.append(topbar, grid);
+    container.appendChild(shell);
+  };
+
+  render();
 }
 
-async function withBusy(
-  refs: ReturnType<typeof createActionPanel>['refs'],
-  action: () => Promise<void>,
-): Promise<void> {
-  refs.inspectButton.disabled = true;
-  refs.validateButton.disabled = true;
-  refs.convertButton.disabled = true;
-  try {
-    await action();
-  } finally {
-    refs.inspectButton.disabled = false;
-    refs.validateButton.disabled = false;
-    refs.convertButton.disabled = false;
-  }
+function detectInitialLang(): AppLang {
+  const lang = navigator.language.toLowerCase();
+  return lang.startsWith('zh') ? 'zh' : 'en';
 }
 
-function updateProgress(
-  refs: ReturnType<typeof createActionPanel>['refs'],
-  event: ProgressEvent,
-): void {
-  const progress = clampProgress(event.progress);
-  refs.stage.textContent = event.stage.toUpperCase();
-  refs.percent.textContent = `${Math.round(progress)}%`;
-  refs.bar.style.width = `${progress}%`;
-  refs.message.textContent = event.message ?? '';
-  appendLog(refs.log, `[${event.stage}] ${event.message ?? ''} (${Math.round(progress)}%)`);
-}
-
-function resetProgress(refs: ReturnType<typeof createActionPanel>['refs']): void {
-  refs.stage.textContent = 'IDLE';
-  refs.percent.textContent = '0%';
-  refs.bar.style.width = '0%';
-  refs.message.textContent = 'READY';
-  logLines.length = 0;
-  refs.log.textContent = '[idle] waiting for input';
-}
-
-function setResult(output: HTMLPreElement, value: unknown): void {
-  output.textContent = JSON.stringify(value, null, 2);
-}
-
-function setError(
-  message: string,
-  output: HTMLPreElement,
-  refs: ReturnType<typeof createActionPanel>['refs'],
-): void {
-  setResult(output, { error: message });
-  updateProgress(refs, { stage: 'error', progress: 0, message });
-}
-
-function appendLog(log: HTMLElement, line: string): void {
-  logLines.push(line);
-  if (logLines.length > 200) {
-    logLines.shift();
-  }
-  log.textContent = logLines.join('\n');
-  log.scrollTop = log.scrollHeight;
-}
-
-function downloadBlob(blob: Blob, fileName: string): void {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-}
-
-function clampProgress(progress: number): number {
-  if (!Number.isFinite(progress)) return 0;
-  if (progress < 0) return 0;
-  if (progress > 100) return 100;
-  return progress;
-}
-
-function toErr(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
-}
-
-function must<T extends Element>(root: ParentNode, selector: string): T {
-  const node = root.querySelector<T>(selector);
-  if (!node) {
-    throw new Error(`missing app element: ${selector}`);
-  }
-  return node;
+function i18n(lang: AppLang): I18nText {
+  return lang === 'zh' ? zh : en;
 }

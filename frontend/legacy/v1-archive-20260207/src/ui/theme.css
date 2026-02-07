@@ -1,0 +1,281 @@
+@import '@fontsource/silkscreen/400.css';
+@import '@fontsource/silkscreen/700.css';
+
+:root {
+  --bg: #0a0a0a;
+  --panel: #111111;
+  --panel-alt: #161616;
+  --line: #f2f2f2;
+  --ink: #f2f2f2;
+  --ink-dim: #bfbfbf;
+  --ink-muted: #9a9a9a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'Silkscreen', monospace;
+  font-size: 12px;
+  image-rendering: pixelated;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.03) 0,
+    rgba(255, 255, 255, 0.03) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  opacity: 0.24;
+}
+
+#app {
+  position: relative;
+  z-index: 1;
+}
+
+.tui-shell {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 18px;
+}
+
+.tui-title {
+  margin: 0 0 8px 0;
+  font-size: 22px;
+  line-height: 1.2;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.tui-subtitle {
+  margin: 0 0 16px 0;
+  color: var(--ink-dim);
+  line-height: 1.5;
+}
+
+.tui-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.tui-panel {
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--panel), var(--panel-alt));
+}
+
+.panel-header {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.panel-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.panel-body {
+  padding: 10px;
+}
+
+.field-label {
+  display: block;
+  color: var(--ink-dim);
+  margin: 0 0 6px 0;
+}
+
+.tui-input,
+.tui-button {
+  width: 100%;
+  font: inherit;
+  color: var(--ink);
+  background: #0f0f0f;
+  border: 1px solid var(--line);
+  border-radius: 0;
+}
+
+.tui-input {
+  min-height: 34px;
+  padding: 6px 8px;
+  margin-bottom: 10px;
+}
+
+.tui-input:focus,
+.tui-button:focus {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--line), inset 0 0 0 1px var(--line);
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.inline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  color: var(--ink-dim);
+}
+
+.inline-toggle input {
+  accent-color: #ffffff;
+}
+
+.panel-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.tui-button {
+  min-height: 34px;
+  padding: 6px 10px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.tui-button:hover:not(:disabled) {
+  background: #1b1b1b;
+}
+
+.tui-button:disabled {
+  cursor: not-allowed;
+  color: var(--ink-muted);
+  border-color: var(--ink-muted);
+}
+
+.tui-button-primary {
+  background: #f2f2f2;
+  color: #0a0a0a;
+}
+
+.tui-button-primary:hover:not(:disabled) {
+  background: #d9d9d9;
+}
+
+.tui-button-small {
+  width: auto;
+  min-height: 28px;
+  padding: 4px 8px;
+}
+
+.tui-progress {
+  border-top: 1px dashed var(--line);
+  margin-top: 6px;
+  padding-top: 10px;
+}
+
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  color: var(--ink-dim);
+  margin-bottom: 6px;
+}
+
+.progress-track {
+  height: 10px;
+  border: 1px solid var(--line);
+  background: #080808;
+}
+
+.progress-bar {
+  width: 0%;
+  height: 100%;
+  background: repeating-linear-gradient(
+    to right,
+    #f2f2f2 0,
+    #f2f2f2 6px,
+    #bcbcbc 6px,
+    #bcbcbc 12px
+  );
+}
+
+.progress-message {
+  margin: 8px 0 0 0;
+  min-height: 16px;
+  color: var(--ink-dim);
+}
+
+.tui-log-wrap {
+  margin-top: 10px;
+}
+
+.log-title {
+  margin-bottom: 6px;
+  color: var(--ink-dim);
+}
+
+.tui-log,
+.result-pre {
+  margin: 0;
+  border: 1px solid var(--line);
+  background: #090909;
+  color: var(--ink);
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+.tui-log {
+  min-height: 110px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.tui-result-panel {
+  margin-top: 12px;
+}
+
+.result-details summary {
+  cursor: pointer;
+  margin-bottom: 8px;
+  color: var(--ink-dim);
+}
+
+.result-pre {
+  min-height: 220px;
+  max-height: 460px;
+  overflow: auto;
+}
+
+@media (max-width: 900px) {
+  .tui-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .tui-shell {
+    padding: 12px;
+  }
+
+  .field-grid {
+    grid-template-columns: 1fr;
+  }
+}

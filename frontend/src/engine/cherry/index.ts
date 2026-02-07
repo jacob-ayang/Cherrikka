@@ -1,380 +1,104 @@
-import type { ArchiveEntries } from '../backup/archive';
-import {
-  hasFile,
-  hasPrefix,
-  listByPrefix,
-  readJson,
-  writeJson,
-  removeByPrefix,
-} from '../backup/archive';
+import { readJsonEntry, writeJsonEntry } from '../backup/zip';
 import type { BackupIR, IRConversation, IRFile, IRMessage, IRPart } from '../ir/types';
-import {
-  asArray,
-  asMap,
-  asString,
-  cloneAny,
-  dedupeStrings,
-  isoNow,
-  pickFirstString,
-} from '../util/common';
-import { extFromFileName, inferLogicalType, isSafeStem } from '../util/file';
+import { asArray, asRecord, asString, cloneJson, dedupeStrings, nowIso, normalizeText, truncate } from '../util/common';
+import { extname, guessLogicalType, normalizePath } from '../util/file';
 import { sha256Hex } from '../util/hash';
-import { marshalGoJSON } from '../util/go_json';
-import { newId } from '../util/id';
-import { redactAny } from '../util/redact';
-import { buildCherryPersistSlicesFromIR, normalizeFromCherryConfig } from '../mapping/settings';
-import { v5 as uuidv5 } from 'uuid';
+import { ensureUUID, newId } from '../util/id';
 
-export async function parseCherryArchive(entries: ArchiveEntries): Promise<BackupIR> {
-  const root = readJson<Record<string, unknown>>(entries, 'data.json') ?? {};
-  const localStorage = asMap(root.localStorage);
-  const indexedDB = asMap(root.indexedDB);
+interface CherryData {
+  time?: number;
+  version?: number;
+  localStorage?: Record<string, unknown>;
+  indexedDB?: Record<string, unknown>;
+}
+
+export function parseCherry(entries: Map<string, Uint8Array>): BackupIR {
+  const root = readJsonEntry<CherryData>(entries, 'data.json');
+  if (!root) {
+    throw new Error('invalid cherry backup: data.json missing or malformed');
+  }
+
+  const localStorage = asRecord(root.localStorage);
+  const indexedDB = asRecord(root.indexedDB);
+
+  const persistSlices = decodePersistSlices(asString(localStorage['persist:cherry-studio']));
+  const assistantsSlice = asRecord(persistSlices.assistants);
+
+  const assistants = parseAssistants(assistantsSlice);
+  const filesById = parseCherryFiles(entries, asArray(indexedDB.files));
+  const conversations = parseCherryConversations(asArray(indexedDB.topics), asArray(indexedDB.message_blocks), filesById);
 
   const ir: BackupIR = {
     sourceApp: 'cherry-studio',
     sourceFormat: 'cherry',
-    createdAt: isoNow(),
-    assistants: [],
-    conversations: [],
-    files: [],
+    targetFormat: 'rikka',
+    assistants,
+    conversations,
+    files: [...filesById.values()],
     config: {
-      'cherry.localStorageRaw': localStorage,
+      'cherry.localStorage': cloneJson(localStorage),
+      'cherry.persistSlices': persistSlices,
+      'cherry.indexedDB.extra': extractIndexedDbExtra(indexedDB),
     },
-    settings: {},
     opaque: {},
-    secrets: {},
     warnings: [],
   };
-  if (hasFile(entries, 'cherrikka/manifest.json') && hasFile(entries, 'cherrikka/raw/source.zip')) {
-    ir.opaque['interop.sidecar.available'] = true;
+
+  for (const file of ir.files) {
+    if (file.missing) ir.warnings.push(`missing cherry file payload: ${file.id}`);
   }
-
-  const blocksById: Record<string, Record<string, unknown>> = {};
-  for (const item of asArray(indexedDB.message_blocks)) {
-    const block = asMap(item);
-    const id = asString(block.id);
-    if (id) {
-      blocksById[id] = block;
-    }
-  }
-
-  const filesById: Record<string, IRFile> = {};
-  for (const item of asArray(indexedDB.files)) {
-    const record = asMap(item);
-    const id = asString(record.id);
-    if (!id) {
-      continue;
-    }
-    const name = pickFirstString(record.origin_name, record.name, id);
-    const ext = pickFirstString(record.ext, extFromFileName(name));
-    const resolvedPath = resolveCherryFilePath(entries, id, ext);
-    const bytes = resolvedPath ? entries.get(resolvedPath) : undefined;
-
-    const file: IRFile = {
-      id,
-      name,
-      ext,
-      mimeType: asString(record.type),
-      relativeSrc: resolvedPath,
-      bytes: bytes ? new Uint8Array(bytes) : undefined,
-      size: typeof record.size === 'number' ? record.size : bytes?.byteLength,
-      createdAt: pickFirstString(record.created_at, record.createdAt),
-      logicalType: inferLogicalType(asString(record.type), ext),
-      missing: !bytes,
-      metadata: {
-        ...record,
-        cherry_id: id,
-        cherry_ext: ext,
-      },
-    };
-    if (bytes) {
-      file.hashSha256 = await sha256Hex(bytes);
-    }
-    filesById[id] = file;
-  }
-
-  for (const path of listByPrefix(entries, 'Data/Files')) {
-    const bytes = entries.get(path);
-    if (!bytes) continue;
-    const fileName = path.split('/').at(-1) ?? '';
-    const ext = extFromFileName(fileName);
-    const id = ext ? fileName.slice(0, fileName.length - ext.length) : fileName;
-    if (!id || filesById[id]) {
-      continue;
-    }
-    filesById[id] = {
-      id,
-      name: fileName,
-      ext,
-      logicalType: inferLogicalType('', ext),
-      orphan: true,
-      relativeSrc: path,
-      bytes: new Uint8Array(bytes),
-      size: bytes.byteLength,
-      hashSha256: await sha256Hex(bytes),
-      createdAt: isoNow(),
-      updatedAt: isoNow(),
-      metadata: {
-        discovered: true,
-        cherry_id: id,
-        cherry_ext: ext,
-      },
-    };
-  }
-
-  ir.files = Object.values(filesById).sort((a, b) => a.id.localeCompare(b.id));
-
-  const explicitTopicAssistant = new Set<string>();
-  const messageAssistantByTopic: Record<string, string> = {};
-  for (const topicRaw of asArray(indexedDB.topics)) {
-    const topic = asMap(topicRaw);
-    const topicId = pickFirstString(topic.id, newId());
-    const topicAssistantId = asString(topic.assistantId);
-    const conversation: IRConversation = {
-      id: topicId,
-      assistantId: topicAssistantId,
-      title: pickFirstString(topic.name),
-      messages: [],
-      opaque: {},
-    };
-    if (topicAssistantId) {
-      explicitTopicAssistant.add(topicId);
-    } else {
-      messageAssistantByTopic[topicId] = chooseDominantAssistantId(asArray(topic.messages));
-    }
-
-    for (const messageRaw of asArray(topic.messages)) {
-      const messageMap = asMap(messageRaw);
-      const message = toIRMessage(messageMap, blocksById, filesById);
-      conversation.messages.push(message);
-    }
-
-    ir.conversations.push(conversation);
-  }
-
-  parsePersistSlices(ir, localStorage);
-  applyConversationAssistantFallbacks(ir, explicitTopicAssistant, messageAssistantByTopic);
-  applyConversationTitleFallbacks(ir);
-  const isolatedUnsupported = extractCherryUnsupportedSettings(ir.config);
-  if (Object.keys(isolatedUnsupported).length > 0) {
-    ir.opaque['interop.cherry.unsupported'] = isolatedUnsupported;
-    ir.warnings.push('unsupported-isolated:cherry.settings');
-  }
-
-  const unknownTables: Record<string, unknown> = {};
-  for (const [table, value] of Object.entries(indexedDB)) {
-    if (table === 'topics' || table === 'message_blocks' || table === 'files') {
-      continue;
-    }
-    unknownTables[table] = value;
-  }
-  if (Object.keys(unknownTables).length > 0) {
-    ir.opaque['cherry.indexedDB.extra'] = unknownTables;
-  }
-
-  const [normalized, warnings] = normalizeFromCherryConfig(ir.config);
-  ir.settings = normalized;
-  ir.warnings = dedupeStrings([
-    ...ir.warnings,
-    ...warnings,
-    ...ir.files.filter((f) => f.missing).map((f) => `missing cherry file payload: ${f.id}`),
-  ]);
 
   return ir;
 }
 
-export function validateCherryArchive(entries: ArchiveEntries): { errors: string[]; warnings: string[] } {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-
-  if (!hasFile(entries, 'data.json')) {
-    errors.push('missing data.json');
-  }
-  if (!hasPrefix(entries, 'Data')) {
-    errors.push('missing Data directory');
-  }
-  if (errors.length > 0) {
-    return { errors: dedupeStrings(errors), warnings: dedupeStrings(warnings) };
-  }
-
-  const root = readJson<Record<string, unknown>>(entries, 'data.json');
-  if (!root) {
-    errors.push('invalid data.json');
-    return { errors: dedupeStrings(errors), warnings: dedupeStrings(warnings) };
-  }
-
-  const indexedDB = asMap(root.indexedDB);
-  const fileIds = new Set<string>();
-
-  for (const item of asArray(indexedDB.files)) {
-    const record = asMap(item);
-    const id = asString(record.id);
-    if (!id) {
-      continue;
-    }
-    fileIds.add(id);
-    const ext = pickFirstString(record.ext);
-    const resolvedPath = resolveCherryFilePath(entries, id, ext);
-    if (!resolvedPath || !entries.has(resolvedPath)) {
-      errors.push(`indexedDB.files entry missing payload: ${id}`);
-    }
-  }
-
-  for (const item of asArray(indexedDB.message_blocks)) {
-    const block = asMap(item);
-    const file = asMap(block.file);
-    const fileId = asString(file.id);
-    if (!fileId) {
-      continue;
-    }
-    if (!fileIds.has(fileId)) {
-      errors.push(`message_blocks.file.id not found in indexedDB.files: ${fileId}`);
-    }
-  }
-
-  const localStorage = asMap(root.localStorage);
-  const persistRaw = asString(localStorage['persist:cherry-studio']);
-  if (persistRaw) {
-    try {
-      const persistSlices = JSON.parse(persistRaw) as Record<string, unknown>;
-      const decoded: Record<string, unknown> = {};
-      for (const [key, value] of Object.entries(persistSlices)) {
-        if (typeof value !== 'string') {
-          decoded[key] = value;
-          continue;
-        }
-        try {
-          decoded[key] = JSON.parse(value);
-        } catch {
-          // ignore malformed slice entries; they are handled by runtime fallback.
-        }
-      }
-
-      const llm = asMap(decoded.llm);
-      const providerIds = new Set<string>();
-      const modelIds = new Set<string>();
-      for (const providerValue of asArray(llm.providers)) {
-        const provider = asMap(providerValue);
-        const providerId = asString(provider.id);
-        if (!providerId) {
-          errors.push('llm.providers has provider with empty id');
-          continue;
-        }
-        providerIds.add(providerId);
-        const models = asArray(provider.models);
-        if (models.length === 0) {
-          errors.push(`llm.providers has provider without models: ${providerId}`);
-        }
-        for (const modelValue of models) {
-          const model = asMap(modelValue);
-          const modelId = pickFirstString(model.id, model.modelId);
-          if (!modelId) {
-            errors.push(`llm.providers model missing id: ${providerId}`);
-            continue;
-          }
-          modelIds.add(modelId);
-          const modelAlias = asString(model.modelId);
-          if (modelAlias) {
-            modelIds.add(modelAlias);
-          }
-          const modelProvider = asString(model.provider);
-          if (!modelProvider) {
-            errors.push(`llm.providers model missing provider: ${modelId}`);
-          } else if (!providerIds.has(modelProvider)) {
-            errors.push(`llm.providers model provider not found: ${modelProvider}`);
-          }
-        }
-      }
-
-      for (const key of ['defaultModel', 'quickModel', 'translateModel', 'topicNamingModel']) {
-        const model = asMap(llm[key]);
-        if (Object.keys(model).length === 0) continue;
-        if (modelIds.size === 0) continue;
-        const modelId = pickFirstString(model.id, model.modelId);
-        if (!modelId) {
-          errors.push(`llm.${key} missing model id`);
-          continue;
-        }
-        if (!modelIds.has(modelId)) {
-          errors.push(`llm.${key} not found in llm.providers: ${modelId}`);
-        }
-      }
-
-      const assistantsSlice = asMap(decoded.assistants);
-      for (const assistantValue of asArray(assistantsSlice.assistants)) {
-        const assistant = asMap(assistantValue);
-        const model = asMap(assistant.model);
-        const modelId = pickFirstString(model.id, model.modelId);
-        if (!modelId) continue;
-        if (modelIds.size === 0) continue;
-        if (!modelIds.has(modelId)) {
-          errors.push(`assistant model not found in llm.providers: ${modelId}`);
-        }
-      }
-    } catch (error) {
-      errors.push(`parse persist:cherry-studio failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  return { errors: dedupeStrings(errors), warnings: dedupeStrings(warnings) };
-}
-
-export async function buildCherryArchiveFromIR(
+export function buildCherry(
   ir: BackupIR,
-  outputEntries: ArchiveEntries,
-  redactSecrets: boolean,
+  outEntries: Map<string, Uint8Array>,
   idMap: Record<string, string>,
-): Promise<string[]> {
+  redactSecrets: boolean,
+): string[] {
   const warnings: string[] = [];
+  const persistSlices = buildPersistSlices(ir, redactSecrets);
+  const fileTable = materializeCherryFiles(ir.files, outEntries, idMap, warnings);
 
-  const baseData = readJson<Record<string, unknown>>(outputEntries, 'data.json') ?? {};
-  const indexedDB = asMap(baseData.indexedDB);
-  const localStorage = asMap(baseData.localStorage);
-
-  removeByPrefix(outputEntries, 'Data/Files');
-
-  const { fileTable, warnings: fileWarnings } = await materializeCherryFiles(outputEntries, ir.files, idMap);
-  warnings.push(...fileWarnings);
-  indexedDB.files = fileTable;
-
-  const convByAssistant: Record<string, IRConversation[]> = {};
-  for (const conversation of ir.conversations) {
-    const key = conversation.assistantId ?? '';
-    if (!convByAssistant[key]) convByAssistant[key] = [];
-    convByAssistant[key].push(conversation);
-  }
-
-  const messageBlocks: Record<string, unknown>[] = [];
   const topics: Record<string, unknown>[] = [];
+  const blocks: Record<string, unknown>[] = [];
 
   for (const conversation of ir.conversations) {
     const topicId = conversation.id || newId();
-    const topicKey = `topic:${conversation.id}`;
-    if (!Object.prototype.hasOwnProperty.call(idMap, topicKey)) {
-      idMap[topicKey] = topicId;
-    }
+    idMap[`topic:${conversation.id}`] = topicId;
+    const msgRows: Record<string, unknown>[] = [];
 
-    const topicMessages: Record<string, unknown>[] = [];
     for (const message of conversation.messages) {
-      const messageId = message.id || newId();
-      const messageKey = `message:${message.id}`;
-      if (!Object.prototype.hasOwnProperty.call(idMap, messageKey)) {
-        idMap[messageKey] = messageId;
-      }
+      const msgId = message.id || newId();
+      idMap[`message:${message.id}`] = msgId;
       const blockIds: string[] = [];
 
       for (const part of message.parts) {
         const blockId = newId();
         blockIds.push(blockId);
-        messageBlocks.push(partToCherryBlock(blockId, messageId, part, ir.files, idMap));
+        blocks.push(partToCherryBlock(part, blockId, msgId, idMap, warnings));
       }
 
-      topicMessages.push({
-        id: messageId,
+      if (blockIds.length === 0) {
+        const blockId = newId();
+        blockIds.push(blockId);
+        blocks.push({
+          id: blockId,
+          messageId: msgId,
+          createdAt: nowIso(),
+          status: 'success',
+          type: 'main_text',
+          content: '',
+        });
+      }
+
+      msgRows.push({
+        id: msgId,
         role: normalizeRole(message.role),
         assistantId: conversation.assistantId,
         topicId,
-        createdAt: fallbackTime(message.createdAt),
+        createdAt: message.createdAt || nowIso(),
         status: 'success',
         blocks: blockIds,
       });
@@ -382,636 +106,592 @@ export async function buildCherryArchiveFromIR(
 
     topics.push({
       id: topicId,
-      name: pickFirstString(conversation.title, 'Imported Conversation'),
-      assistantId: conversation.assistantId ?? '',
-      createdAt: fallbackTime(conversation.createdAt),
-      updatedAt: fallbackTime(conversation.updatedAt),
-      messages: topicMessages,
+      name: normalizeConversationTitle(conversation.title),
+      assistantId: conversation.assistantId,
+      createdAt: conversation.createdAt || nowIso(),
+      updatedAt: conversation.updatedAt || nowIso(),
+      messages: msgRows,
     });
   }
 
-  indexedDB.topics = topics;
-  indexedDB.message_blocks = messageBlocks;
+  const localStorage: Record<string, unknown> = {
+    'persist:cherry-studio': encodePersistSlices(persistSlices),
+  };
 
-  const extraTables = asMap(ir.opaque['cherry.indexedDB.extra']);
-  for (const [table, value] of Object.entries(extraTables)) {
-    if (table in indexedDB) continue;
-    indexedDB[table] = cloneTableValue(value);
+  const indexedDB: Record<string, unknown> = {
+    topics,
+    message_blocks: blocks,
+    files: fileTable,
+  };
+
+  const extras = asRecord(ir.config['cherry.indexedDB.extra']);
+  for (const [k, v] of Object.entries(extras)) {
+    if (!(k in indexedDB)) indexedDB[k] = v;
   }
 
-  let persistSlices = asMap(ir.config['cherry.persistSlices']);
-  if (Object.keys(persistSlices).length === 0) {
-    persistSlices = defaultPersistSlices();
-  }
-
-  const assistantsSlice = buildAssistantsSlice(ir.assistants, convByAssistant);
-  let nextSlices: Record<string, unknown>;
-  let mappingWarnings: string[];
-  [nextSlices, mappingWarnings] = buildCherryPersistSlicesFromIR(ir, persistSlices, assistantsSlice);
-  warnings.push(...mappingWarnings);
-
-  if (redactSecrets) {
-    nextSlices = redactAny(nextSlices) as Record<string, unknown>;
-  }
-
-  localStorage['persist:cherry-studio'] = encodePersistSlicesForStorage(nextSlices);
-
-  const data = {
-    ...baseData,
+  const data: CherryData = {
     time: Date.now(),
     version: 5,
     localStorage,
     indexedDB,
   };
 
-  writeJson(outputEntries, 'data.json', data, false);
+  writeJsonEntry(outEntries, 'data.json', data);
+  ensureKeepFile(outEntries);
   return dedupeStrings(warnings);
 }
 
-function parsePersistSlices(ir: BackupIR, localStorage: Record<string, unknown>): void {
-  const persistRaw = asString(localStorage['persist:cherry-studio']);
-  if (!persistRaw) {
-    return;
+function parseAssistants(slice: Record<string, unknown>): BackupIR['assistants'] {
+  const out: BackupIR['assistants'] = [];
+  for (const item of asArray(slice.assistants)) {
+    const assistant = asRecord(item);
+    out.push({
+      id: asString(assistant.id) || newId(),
+      name: asString(assistant.name) || 'Imported Assistant',
+      prompt: asString(assistant.prompt),
+      settings: asRecord(assistant.settings),
+      model: asRecord(assistant.model),
+      opaque: assistant,
+    });
   }
-
-  let persistSlices: Record<string, unknown>;
-  try {
-    persistSlices = JSON.parse(persistRaw) as Record<string, unknown>;
-  } catch {
-    ir.warnings.push('parse persist:cherry-studio failed');
-    return;
+  if (out.length === 0) {
+    out.push({ id: newId(), name: 'Default Assistant', prompt: '', settings: {}, model: {}, opaque: {} });
   }
+  return out;
+}
 
-  const decoded: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(persistSlices)) {
-    const text = asString(value);
-    if (!text) {
-      decoded[key] = value;
-      continue;
-    }
-    try {
-      decoded[key] = JSON.parse(text) as unknown;
-    } catch {
-      decoded[key] = value;
-    }
-  }
+function parseCherryFiles(
+  entries: Map<string, Uint8Array>,
+  filesRaw: unknown[],
+): Map<string, IRFile> {
+  const byId = new Map<string, IRFile>();
 
-  ir.config['cherry.persistSlices'] = decoded;
+  for (const raw of filesRaw) {
+    const row = asRecord(raw);
+    const id = asString(row.id);
+    if (!id) continue;
 
-  const assistants = asArray(asMap(decoded.assistants).assistants);
-  for (const item of assistants) {
-    const assistant = asMap(item);
-    const assistantId = rawString(assistant.id);
-    ir.assistants.push({
-      id: assistantId || newId(),
-      name: rawString(assistant.name),
-      prompt: rawString(assistant.prompt),
-      description: rawString(assistant.description),
-      model: asMap(assistant.model),
-      settings: asMap(assistant.settings),
-      opaque: {},
+    const origin = asString(row.origin_name) || asString(row.name) || id;
+    const ext = asString(row.ext) || extname(origin);
+    const relPath = findCherryFilePath(entries, id, ext, asString(row.path));
+    const bytes = relPath ? entries.get(relPath) ?? new Uint8Array() : new Uint8Array();
+    const mime = asString(row.mime_type) || asString(row.type) || 'application/octet-stream';
+
+    byId.set(id, {
+      id,
+      name: origin,
+      ext,
+      mimeType: mime,
+      logicalType: guessLogicalType(mime, ext),
+      relativeSrc: relPath,
+      size: bytes.length,
+      createdAt: normalizeTimestamp(row.created_at) || normalizeTimestamp(row.createdAt) || nowIso(),
+      updatedAt: normalizeTimestamp(row.updated_at) || normalizeTimestamp(row.updatedAt) || nowIso(),
+      hashSha256: '',
+      missing: bytes.length === 0,
+      orphan: false,
+      bytes,
+      metadata: {
+        cherry_id: id,
+        cherry_ext: ext,
+      },
     });
   }
 
-  if (decoded.settings) {
-    ir.config['cherry.settings'] = decoded.settings;
+  for (const key of entries.keys()) {
+    if (!key.startsWith('Data/Files/')) continue;
+    const name = key.slice('Data/Files/'.length);
+    if (!name || name === '.keep') continue;
+    const ext = extname(name);
+    const stem = ext ? name.slice(0, -ext.length) : name;
+    if (!stem || byId.has(stem)) continue;
+    const bytes = entries.get(key) ?? new Uint8Array();
+    byId.set(stem, {
+      id: stem,
+      name,
+      ext,
+      mimeType: 'application/octet-stream',
+      logicalType: guessLogicalType('', ext),
+      relativeSrc: key,
+      size: bytes.length,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      hashSha256: '',
+      missing: bytes.length === 0,
+      orphan: true,
+      bytes,
+      metadata: {
+        discovered: true,
+      },
+    });
   }
-  if (decoded.llm) {
-    ir.config['cherry.llm'] = decoded.llm;
-  }
+
+  return byId;
 }
 
-function applyConversationAssistantFallbacks(
-  ir: BackupIR,
-  explicitTopicAssistant: Set<string>,
-  messageAssistantByTopic: Record<string, string>,
-): void {
-  const assistantsByTopic = cherryAssistantTopicsFromPersist(ir);
-  for (const conversation of ir.conversations) {
-    if (explicitTopicAssistant.has(conversation.id)) {
-      continue;
-    }
-    const persistAssistantId = asString(assistantsByTopic[conversation.id]);
-    if (persistAssistantId) {
-      conversation.assistantId = persistAssistantId;
-      continue;
-    }
-    const messageAssistantId = asString(messageAssistantByTopic[conversation.id]);
-    if (messageAssistantId) {
-      conversation.assistantId = messageAssistantId;
-    }
+function parseCherryConversations(
+  topicsRaw: unknown[],
+  blocksRaw: unknown[],
+  filesById: Map<string, IRFile>,
+): IRConversation[] {
+  const blocksById = new Map<string, Record<string, unknown>>();
+  for (const raw of blocksRaw) {
+    const block = asRecord(raw);
+    const id = asString(block.id);
+    if (id) blocksById.set(id, block);
   }
-}
 
-function applyConversationTitleFallbacks(ir: BackupIR): void {
-  const topicNames = cherryTopicNamesFromPersist(ir);
-  for (const conversation of ir.conversations) {
-    if (pickFirstString(conversation.title) !== '') {
-      continue;
-    }
-    const topicName = pickFirstString(topicNames[conversation.id]);
-    if (topicName) {
-      conversation.title = topicName;
-    }
-  }
-}
+  const conversations: IRConversation[] = [];
 
-function cherryAssistantTopicsFromPersist(ir: BackupIR): Record<string, string> {
-  const out: Record<string, string> = {};
-  const persist = asMap(ir.config['cherry.persistSlices']);
-  const assistants = asArray(asMap(persist.assistants).assistants);
-  for (const assistantValue of assistants) {
-    const assistant = asMap(assistantValue);
-    const assistantId = asString(assistant.id);
-    for (const topicValue of asArray(assistant.topics)) {
-      const topic = asMap(topicValue);
-      const topicId = asString(topic.id);
-      if (!topicId) continue;
-      let mappedAssistantId = assistantId;
-      const topicAssistantId = asString(topic.assistantId);
-      if (!mappedAssistantId) {
-        mappedAssistantId = topicAssistantId;
-      } else if (topicAssistantId && topicAssistantId !== mappedAssistantId) {
-        ir.warnings.push(`topic ${topicId} assistantId (${topicAssistantId}) mismatches owner assistant (${mappedAssistantId}), using owner`);
+  for (const raw of topicsRaw) {
+    const topic = asRecord(raw);
+    const conv: IRConversation = {
+      id: asString(topic.id) || newId(),
+      assistantId: asString(topic.assistantId),
+      title: asString(topic.name),
+      createdAt: asString(topic.createdAt) || nowIso(),
+      updatedAt: asString(topic.updatedAt) || nowIso(),
+      messages: [],
+      opaque: {},
+    };
+
+    for (const msgRaw of asArray(topic.messages)) {
+      const msg = asRecord(msgRaw);
+      const parts: IRPart[] = [];
+      for (const blockIdRaw of asArray(msg.blocks)) {
+        const blockId = asString(blockIdRaw);
+        const block = blocksById.get(blockId);
+        if (!block) continue;
+        parts.push(cherryBlockToPart(block, filesById));
       }
-      if (!mappedAssistantId) continue;
-      if (out[topicId] && out[topicId] !== mappedAssistantId) {
-        ir.warnings.push(`topic ${topicId} mapped to multiple assistants in persist slices: ${out[topicId]} vs ${mappedAssistantId}`);
-        continue;
+      if (parts.length === 0) {
+        const content = asString(msg.content);
+        parts.push({ type: 'text', content });
       }
-      out[topicId] = mappedAssistantId;
+      conv.messages.push({
+        id: asString(msg.id) || newId(),
+        role: normalizeRole(asString(msg.role)),
+        createdAt: asString(msg.createdAt) || nowIso(),
+        modelId: asString(msg.modelId),
+        parts,
+        opaque: {},
+      });
     }
+
+    conversations.push(conv);
   }
-  return out;
+
+  return conversations;
 }
 
-function cherryTopicNamesFromPersist(ir: BackupIR): Record<string, string> {
-  const out: Record<string, string> = {};
-  const persist = asMap(ir.config['cherry.persistSlices']);
-  const assistants = asArray(asMap(persist.assistants).assistants);
-  for (const assistantValue of assistants) {
-    const assistant = asMap(assistantValue);
-    for (const topicValue of asArray(assistant.topics)) {
-      const topic = asMap(topicValue);
-      const topicId = asString(topic.id);
-      if (!topicId) continue;
-      const topicName = pickFirstString(topic.name);
-      if (!topicName) continue;
-      if (!out[topicId]) {
-        out[topicId] = topicName;
-      }
-    }
-  }
-  return out;
-}
+function cherryBlockToPart(block: Record<string, unknown>, filesById: Map<string, IRFile>): IRPart {
+  const type = asString(block.type);
+  const baseMeta: Record<string, unknown> = { cherryBlockType: type };
 
-function chooseDominantAssistantId(messages: unknown[]): string {
-  const counts = new Map<string, number>();
-  const order: string[] = [];
-  for (const value of messages) {
-    const message = asMap(value);
-    const assistantId = asString(message.assistantId);
-    if (!assistantId) continue;
-    if (!counts.has(assistantId)) {
-      counts.set(assistantId, 1);
-      order.push(assistantId);
-    } else {
-      counts.set(assistantId, (counts.get(assistantId) ?? 0) + 1);
-    }
+  if (['main_text', 'code', 'translation', 'compact'].includes(type)) {
+    return { type: 'text', content: asString(block.content), metadata: baseMeta };
   }
-  let best = '';
-  let bestCount = 0;
-  for (const assistantId of order) {
-    const count = counts.get(assistantId) ?? 0;
-    if (count > bestCount) {
-      best = assistantId;
-      bestCount = count;
-    }
+  if (type === 'thinking') {
+    return { type: 'reasoning', content: asString(block.content), metadata: baseMeta };
   }
-  return best;
-}
-
-function toIRMessage(
-  messageMap: Record<string, unknown>,
-  blocksById: Record<string, Record<string, unknown>>,
-  filesById: Record<string, IRFile>,
-): IRMessage {
-  const message: IRMessage = {
-    id: pickFirstString(messageMap.id, newId()),
-    role: pickFirstString(messageMap.role, 'user'),
-    createdAt: pickFirstString(messageMap.createdAt),
-    modelId: pickFirstString(messageMap.modelId),
-    parts: [],
-    opaque: {},
-  };
-
-  for (const blockIdValue of asArray(messageMap.blocks)) {
-    const blockId = asString(blockIdValue);
-    if (!blockId) continue;
-    const block = blocksById[blockId];
-    if (!block) continue;
-    message.parts.push(mapBlockToPart(block, filesById));
+  if (type === 'tool') {
+    return {
+      type: 'tool',
+      name: asString(block.toolName),
+      toolCallId: asString(block.toolId),
+      input: stringifyJson(block.arguments),
+      output: asString(block.content) ? [{ type: 'text', content: asString(block.content) }] : [],
+      metadata: baseMeta,
+    };
   }
 
-  if (message.parts.length === 0) {
-    message.parts.push({ type: 'text', content: pickFirstString(messageMap.content) });
-  }
-  if (message.parts.length === 0) {
-    message.parts.push({ type: 'text', content: '' });
-  }
-  return message;
-}
+  const fileMeta = asRecord(block.file);
+  const fileId = asString(fileMeta.id);
+  const file = filesById.get(fileId);
+  const name = asString(fileMeta.origin_name) || asString(fileMeta.name) || file?.name || '';
 
-function mapBlockToPart(block: Record<string, unknown>, filesById: Record<string, IRFile>): IRPart {
-  const blockType = pickFirstString(block.type);
-  const basePart: IRPart = {
+  if (type === 'image') {
+    return {
+      type: 'image',
+      fileId,
+      mediaUrl: asString(block.url),
+      name,
+      mimeType: file?.mimeType,
+      metadata: baseMeta,
+    };
+  }
+  if (type === 'video') {
+    return {
+      type: 'video',
+      fileId,
+      mediaUrl: asString(block.url),
+      name,
+      mimeType: file?.mimeType,
+      metadata: baseMeta,
+    };
+  }
+  if (type === 'file') {
+    return {
+      type: 'document',
+      fileId,
+      name,
+      mimeType: file?.mimeType,
+      metadata: baseMeta,
+    };
+  }
+
+  return {
     type: 'text',
+    content: asString(block.content) || `[unsupported cherry block: ${type}]`,
     metadata: {
-      cherryBlockType: blockType,
+      ...baseMeta,
+      raw: block,
     },
   };
-
-  if (['main_text', 'code', 'translation', 'compact'].includes(blockType)) {
-    basePart.type = 'text';
-    basePart.content = rawString(block.content);
-  } else if (blockType === 'thinking') {
-    basePart.type = 'reasoning';
-    basePart.content = rawString(block.content);
-  } else if (blockType === 'tool') {
-    basePart.type = 'tool';
-    basePart.name = pickFirstString(block.toolName);
-    basePart.toolCallId = pickFirstString(block.toolId);
-    if (block.arguments !== undefined) {
-      basePart.input = marshalGoJSON(block.arguments);
-    }
-    if (rawString(block.content) !== '') {
-      basePart.output = [{ type: 'text', content: rawString(block.content) }];
-    }
-  } else if (blockType === 'image' || blockType === 'video') {
-    basePart.type = blockType;
-    basePart.mediaUrl = pickFirstString(block.url);
-    fillPartFileInfo(basePart, block, filesById);
-  } else if (blockType === 'file') {
-    basePart.type = 'document';
-    fillPartFileInfo(basePart, block, filesById);
-    if (!basePart.name) {
-      basePart.name = pickFirstString(block.name);
-    }
-  } else {
-    basePart.type = 'text';
-    const content = rawString(block.content);
-    basePart.content = content !== '' ? content : `[unsupported cherry block: ${blockType}]`;
-    (basePart.metadata as Record<string, unknown>).raw = block;
-  }
-
-  return basePart;
 }
 
-function fillPartFileInfo(part: IRPart, block: Record<string, unknown>, filesById: Record<string, IRFile>): void {
-  const file = asMap(block.file);
-  if (Object.keys(file).length === 0) return;
-  const fileId = pickFirstString(file.id);
-  if (fileId) {
-    part.fileId = fileId;
-  }
-  part.name = part.name ?? pickFirstString(file.origin_name, file.name);
-  if (!part.mimeType && fileId && filesById[fileId]) {
-    part.mimeType = filesById[fileId].mimeType;
-  }
-}
-
-async function materializeCherryFiles(
-  outputEntries: ArchiveEntries,
-  files: IRFile[],
+function partToCherryBlock(
+  part: IRPart,
+  blockId: string,
+  messageId: string,
   idMap: Record<string, string>,
-): Promise<{ fileTable: Record<string, unknown>[]; warnings: string[] }> {
-  const warnings: string[] = [];
+  warnings: string[],
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    id: blockId,
+    messageId,
+    createdAt: nowIso(),
+    status: 'success',
+  };
+
+  if (part.type === 'reasoning') {
+    return { ...base, type: 'thinking', content: part.content ?? '' };
+  }
+
+  if (part.type === 'tool') {
+    const summarized = summarizeToolPart(part);
+    return {
+      ...base,
+      type: 'main_text',
+      content: summarized,
+    };
+  }
+
+  if (part.type === 'image' || part.type === 'video' || part.type === 'audio' || part.type === 'document') {
+    const mappedFileId = part.fileId ? idMap[`file:${part.fileId}`] : '';
+    const fileObj = mappedFileId
+      ? {
+          id: mappedFileId,
+          name: `${mappedFileId}${extname(part.name || '')}`,
+          origin_name: part.name || mappedFileId,
+          ext: extname(part.name || ''),
+          type: part.mimeType || 'application/octet-stream',
+        }
+      : undefined;
+
+    if (!mappedFileId) {
+      warnings.push(`missing file mapping for part fileId=${part.fileId ?? ''}`);
+    }
+
+    if (part.type === 'image') {
+      return { ...base, type: 'image', url: part.mediaUrl ?? '', file: fileObj };
+    }
+    if (part.type === 'video') {
+      return { ...base, type: 'video', url: part.mediaUrl ?? '', file: fileObj };
+    }
+    return { ...base, type: 'file', content: part.content ?? '', file: fileObj };
+  }
+
+  return {
+    ...base,
+    type: 'main_text',
+    content: part.content ?? '',
+  };
+}
+
+function materializeCherryFiles(
+  files: IRFile[],
+  outEntries: Map<string, Uint8Array>,
+  idMap: Record<string, string>,
+  warnings: string[],
+): Record<string, unknown>[] {
   const fileTable: Record<string, unknown>[] = [];
-  const usedIds = new Set<string>();
+  const used = new Set<string>();
 
   for (const file of files) {
-    let fileId = chooseCherryFileId(file);
-    if (usedIds.has(fileId)) {
-      fileId = newId();
-    }
-    usedIds.add(fileId);
+    let fileId = asString(asRecord(file.metadata).cherry_id) || file.id;
+    if (!fileId || used.has(fileId)) fileId = newId();
+    used.add(fileId);
+
     idMap[`file:${file.id}`] = fileId;
-
-    const ext = pickFirstString(file.ext, extFromFileName(file.name));
-    const fileName = `${fileId}${ext}`;
-    const path = `Data/Files/${fileName}`;
-
+    const ext = file.ext || extname(file.name);
+    const entryName = `${fileId}${ext}`;
+    const entryPath = `Data/Files/${entryName}`;
     const bytes = file.bytes ?? new Uint8Array();
-    if (!file.bytes) {
-      warnings.push(`file ${file.id} missing source payload; created empty placeholder`);
+    outEntries.set(entryPath, bytes);
+
+    if (bytes.length === 0) {
+      warnings.push(`file ${file.id} has empty payload in output`);
     }
-    outputEntries.set(path, bytes);
 
     fileTable.push({
       id: fileId,
-      name: fileName,
-      origin_name: pickFirstString(file.name, fileName),
-      path,
-      size: file.size ?? bytes.byteLength,
+      name: entryName,
+      origin_name: file.name || entryName,
+      path: entryPath,
+      size: bytes.length,
       ext,
-      type: pickFirstString(file.logicalType, file.mimeType, 'other'),
-      created_at: fallbackTime(file.createdAt),
+      type: file.logicalType || file.mimeType || 'other',
+      created_at: file.createdAt || nowIso(),
       count: 1,
     });
   }
 
-  if (fileTable.length === 0) {
-    outputEntries.set('Data/Files/.keep', new Uint8Array());
-  }
-
-  return { fileTable, warnings: dedupeStrings(warnings) };
+  return fileTable;
 }
 
-function partToCherryBlock(
-  blockId: string,
-  messageId: string,
-  part: IRPart,
-  files: IRFile[],
-  idMap: Record<string, string>,
-): Record<string, unknown> {
-  const block: Record<string, unknown> = {
-    id: blockId,
-    messageId,
-    createdAt: isoNow(),
-    status: 'success',
-  };
+function buildPersistSlices(ir: BackupIR, redact: boolean): Record<string, unknown> {
+  const existing = asRecord(ir.config['cherry.persistSlices']);
+  const slices: Record<string, unknown> = Object.keys(existing).length > 0 ? cloneJson(existing) : {};
 
-  if (part.metadata) {
-    block.metadata = part.metadata;
-  }
-
-  const findFileRef = (fileId: string): Record<string, unknown> | undefined => {
-    const mapped = idMap[`file:${fileId}`];
-    for (const file of files) {
-      if (file.id !== fileId && idMap[`file:${file.id}`] !== mapped) {
-        continue;
-      }
-      const resolvedId = mapped || file.id;
-      const ext = pickFirstString(file.ext, extFromFileName(file.name));
-      return {
-        id: resolvedId,
-        name: `${resolvedId}${ext}`,
-        origin_name: file.name,
-        ext,
-        size: file.size ?? file.bytes?.byteLength ?? 0,
-        type: pickFirstString(file.logicalType, file.mimeType, 'other'),
-      };
-    }
-    return undefined;
-  };
-
-  switch (part.type) {
-    case 'reasoning':
-      block.type = 'thinking';
-      block.content = part.content ?? '';
-      break;
-    case 'tool':
-      block.type = 'tool';
-      block.toolId = pickFirstString(part.toolCallId, newId());
-      block.toolName = pickFirstString(part.name, 'tool');
-      if (part.input) {
-        try {
-          block.arguments = JSON.parse(part.input) as unknown;
-        } catch {
-          block.arguments = { raw: part.input };
-        }
-      }
-      if (part.output && part.output.length > 0) {
-        block.content = part.output[0].content ?? '';
-      }
-      break;
-    case 'image':
-    case 'video':
-      block.type = part.type;
-      block.url = part.mediaUrl ?? '';
-      if (part.fileId) {
-        const file = findFileRef(part.fileId);
-        if (file) block.file = file;
-      }
-      break;
-    case 'audio':
-    case 'document':
-      block.type = 'file';
-      if (part.fileId) {
-        const file = findFileRef(part.fileId);
-        if (file) block.file = file;
-      }
-      if (part.content) {
-        block.content = part.content;
-      }
-      break;
-    default:
-      block.type = 'main_text';
-      block.content = part.content ?? '';
-  }
-
-  return block;
-}
-
-function buildAssistantsSlice(
-  assistants: BackupIR['assistants'],
-  convByAssistant: Record<string, IRConversation[]>,
-): Record<string, unknown> {
-  const normalized = assistants.length > 0 ? assistants : [{ id: 'default', name: 'Default' }];
-
-  const list = normalized.map((assistant, index) => {
-    const assistantId = pickFirstString(assistant.id, newId());
-    const topics = (convByAssistant[assistantId] ?? []).map((conversation) => ({
-      id: pickFirstString(conversation.id, newId()),
-      assistantId,
-      name: pickFirstString(conversation.title, 'Imported Conversation'),
-      createdAt: fallbackTime(conversation.createdAt),
-      updatedAt: fallbackTime(conversation.updatedAt),
-      messages: [],
-      isNameManuallyEdited: true,
-    }));
-
-    return {
-      id: assistantId,
-      name: pickFirstString(assistant.name, `Assistant ${index + 1}`),
-      prompt: assistant.prompt ?? '',
-      topics,
+  const assistants = buildCherryAssistants(ir.assistants, ir.conversations);
+  slices.assistants = {
+    defaultAssistant: {
+      id: 'default',
+      name: 'Default',
+      prompt: assistants[0]?.prompt ?? '',
+      settings: { contextCount: 32, streamOutput: true, temperature: 0.7 },
       type: 'assistant',
-      emoji: '😀',
-      settings: Object.keys(asMap(assistant.settings)).length > 0
-        ? assistant.settings
-        : { contextCount: 32, temperature: 0.7, streamOutput: true },
+      topics: [],
       regularPhrases: [],
-    };
-  });
-
-  const defaultAssistant = { ...list[0], id: 'default', name: 'Default' };
-  return {
-    defaultAssistant,
-    assistants: list,
+      emoji: '😀',
+    },
+    assistants,
     tagsOrder: [],
     collapsedTags: {},
     presets: [],
     unifiedListOrder: [],
   };
+
+  slices.llm = buildCherryLlm(ir);
+  slices.settings = asRecord(slices.settings);
+  slices.backup = asRecord(slices.backup);
+
+  if (redact) {
+    return redactPersistSlices(slices);
+  }
+  return slices;
 }
 
-function extractCherryUnsupportedSettings(config: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-
-  const settings = asMap(config['cherry.settings']);
-  const isolatedSettings: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(settings)) {
-    if (key.toLowerCase().includes('memory') && isMeaningfulUnsupported(value)) {
-      isolatedSettings[key] = cloneAny(value);
-    }
-  }
-  if (Object.keys(isolatedSettings).length > 0) {
-    out.settings = isolatedSettings;
+function buildCherryAssistants(assistants: BackupIR['assistants'], conversations: IRConversation[]): Record<string, unknown>[] {
+  const convMap = new Map<string, IRConversation[]>();
+  for (const conv of conversations) {
+    const list = convMap.get(conv.assistantId) ?? [];
+    list.push(conv);
+    convMap.set(conv.assistantId, list);
   }
 
-  const persistSlices = asMap(config['cherry.persistSlices']);
-  const isolatedSlices: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(persistSlices)) {
-    if (key.toLowerCase().includes('memory') && isMeaningfulUnsupported(value)) {
-      isolatedSlices[key] = cloneAny(value);
-    }
-  }
-  if (Object.keys(isolatedSlices).length > 0) {
-    out.persistSlices = isolatedSlices;
-  }
+  const source = assistants.length > 0 ? assistants : [{ id: newId(), name: 'Imported Assistant', prompt: '' }];
 
-  return out;
+  return source.map((assistant, index) => {
+    const topics = (convMap.get(assistant.id) ?? []).map((conv) => ({
+      id: conv.id,
+      assistantId: assistant.id,
+      name: normalizeConversationTitle(conv.title),
+      createdAt: conv.createdAt || nowIso(),
+      updatedAt: conv.updatedAt || nowIso(),
+      messages: [],
+      isNameManuallyEdited: true,
+    }));
+
+    return {
+      id: assistant.id || newId(),
+      name: assistant.name || `Assistant ${index + 1}`,
+      prompt: assistant.prompt || '',
+      topics,
+      type: 'assistant',
+      emoji: '😀',
+      settings: asRecord(assistant.settings),
+      regularPhrases: [],
+    };
+  });
 }
 
-function isMeaningfulUnsupported(value: unknown): boolean {
-  if (value === null || value === undefined) {
-    return false;
+function buildCherryLlm(ir: BackupIR): Record<string, unknown> {
+  const fromCherry = asRecord(asRecord(ir.config['cherry.persistSlices']).llm);
+  if (Object.keys(fromCherry).length > 0) {
+    return cloneJson(fromCherry);
   }
-  if (typeof value === 'string') {
-    return value.trim() !== '';
-  }
-  if (typeof value === 'boolean') {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.length > 0;
-  }
-  if (typeof value === 'object') {
-    return Object.keys(value as Record<string, unknown>).length > 0;
-  }
-  return true;
-}
 
-function defaultPersistSlices(): Record<string, unknown> {
+  const rikka = asRecord(ir.config['rikka.settings']);
+  const providers = asArray(rikka.providers).map((raw) => {
+    const provider = asRecord(raw);
+    return {
+      id: asString(provider.id) || newId(),
+      name: asString(provider.name) || 'Imported Provider',
+      type: asString(provider.type) || 'openai',
+      apiHost: asString(provider.baseUrl),
+      baseUrl: asString(provider.baseUrl),
+      enabled: provider.enabled !== false,
+      models: asArray(provider.models).map((mRaw) => {
+        const m = asRecord(mRaw);
+        const id = asString(m.id) || asString(m.modelId) || newId();
+        return {
+          id,
+          modelId: asString(m.modelId) || id,
+          name: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
+          displayName: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
+          provider: asString(provider.id),
+          group: 'default',
+          type: 'CHAT',
+        };
+      }),
+    };
+  });
+
+  const allModels = providers.flatMap((p) => asArray<Record<string, unknown>>(p.models));
+  const selectedId = asString(rikka.chatModelId) || asString(allModels[0]?.id);
+  const selected = allModels.find((m) => asString(m.id) === selectedId) ?? allModels[0] ?? {
+    id: 'default-model',
+    modelId: 'gpt-4o-mini',
+    name: 'gpt-4o-mini',
+    displayName: 'gpt-4o-mini',
+    provider: asString(providers[0]?.id) || 'openai',
+    group: 'default',
+    type: 'CHAT',
+  };
+
   return {
-    settings: {
-      userId: newId(),
-      userName: '',
-      skipBackupFile: false,
-    },
-    llm: {
-      defaultModel: {
-        id: 'default-model',
-        provider: 'openai',
-        name: 'gpt-4o-mini',
-        group: 'default',
-      },
-      quickModel: null,
-      translateModel: null,
-    },
-    backup: {
-      webdavSync: { lastSyncTime: null, syncing: false, lastSyncError: null },
-      localBackupSync: { lastSyncTime: null, syncing: false, lastSyncError: null },
-      s3Sync: { lastSyncTime: null, syncing: false, lastSyncError: null },
-    },
+    providers,
+    defaultModel: selected,
+    quickModel: selected,
+    translateModel: selected,
+    topicNamingModel: selected,
   };
 }
 
-function resolveCherryFilePath(entries: ArchiveEntries, id: string, ext: string): string | undefined {
-  const direct = `Data/Files/${id}${ext}`;
-  if (entries.has(direct)) {
-    return direct;
-  }
-  for (const path of listByPrefix(entries, 'Data/Files')) {
-    const fileName = path.split('/').at(-1) ?? '';
-    if (fileName === id || fileName.startsWith(`${id}.`)) {
-      return path;
+function decodePersistSlices(payload: string): Record<string, unknown> {
+  if (!payload) return {};
+  try {
+    const outer = asRecord(JSON.parse(payload));
+    const decoded: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(outer)) {
+      if (typeof v === 'string') {
+        try {
+          decoded[k] = JSON.parse(v);
+        } catch {
+          decoded[k] = v;
+        }
+      } else {
+        decoded[k] = v;
+      }
     }
+    return decoded;
+  } catch {
+    return {};
   }
-  return undefined;
 }
 
-function chooseCherryFileId(file: IRFile): string {
-  const metadata = asMap(file.metadata);
-  const metadataId = asString(metadata.cherry_id);
-  if (metadataId && isSafeStem(metadataId)) {
-    return metadataId;
+function encodePersistSlices(slices: Record<string, unknown>): string {
+  const outer: Record<string, string> = {};
+  for (const [k, v] of Object.entries(slices)) {
+    outer[k] = JSON.stringify(v);
   }
-  if (isSafeStem(file.id)) {
-    return file.id;
-  }
-  return deterministicCherryFileId(file);
-}
-
-function deterministicCherryFileId(file: IRFile): string {
-  const seedParts = [
-    file.id?.trim() ?? '',
-    file.name?.trim() ?? '',
-    file.ext?.trim() ?? '',
-    file.relativeSrc?.trim() ?? '',
-    file.hashSha256?.trim() ?? '',
-  ];
-  const seed = seedParts.join('|') || 'cherrikka:file:unknown';
-  return uuidv5(seed, uuidv5.URL);
-}
-
-function fallbackTime(value?: string): string {
-  return pickFirstString(value, isoNow());
+  return JSON.stringify(outer);
 }
 
 function normalizeRole(role: string): string {
-  const normalized = role.trim().toLowerCase();
-  if (normalized === 'assistant' || normalized === 'user' || normalized === 'system') {
-    return normalized;
-  }
+  const clean = role.trim().toLowerCase();
+  if (clean === 'assistant' || clean === 'user' || clean === 'system') return clean;
+  if (clean === 'tool') return 'assistant';
   return 'assistant';
 }
 
-function cloneTableValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => cloneTableValue(item));
+function normalizeConversationTitle(input: string): string {
+  const clean = normalizeText(input);
+  if (!clean) return 'Imported Conversation';
+  return truncate(clean, 80);
+}
+
+function normalizeTimestamp(value: unknown): string {
+  const s = asString(value);
+  if (s) return s;
+  const n = Number(value);
+  if (Number.isFinite(n) && n > 0) return new Date(n).toISOString();
+  return '';
+}
+
+function summarizeToolPart(part: IRPart): string {
+  const lines: string[] = [];
+  lines.push(`[tool] ${part.name || 'unknown'}`);
+  if (part.input) lines.push(`input: ${part.input}`);
+  if (part.output && part.output.length > 0) {
+    lines.push(`output: ${part.output.map((o) => o.content ?? '').join(' | ')}`);
   }
-  if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = cloneTableValue(child);
+  if (part.content) lines.push(`content: ${part.content}`);
+  return lines.join('\n');
+}
+
+function stringifyJson(value: unknown): string {
+  try {
+    if (value === undefined) return '';
+    return JSON.stringify(value);
+  } catch {
+    return '';
+  }
+}
+
+function findCherryFilePath(entries: Map<string, Uint8Array>, id: string, ext: string, recordedPath: string): string {
+  const candidateA = normalizePath(recordedPath);
+  if (candidateA && entries.has(candidateA)) return candidateA;
+  const candidateB = `Data/Files/${id}${ext}`;
+  if (entries.has(candidateB)) return candidateB;
+  for (const key of entries.keys()) {
+    if (!key.startsWith('Data/Files/')) continue;
+    const fileName = key.slice('Data/Files/'.length);
+    if (fileName === id || fileName.startsWith(`${id}.`)) return key;
+  }
+  return '';
+}
+
+function ensureKeepFile(entries: Map<string, Uint8Array>): void {
+  let hasFile = false;
+  for (const key of entries.keys()) {
+    if (key.startsWith('Data/Files/') && key !== 'Data/Files/.keep') {
+      hasFile = true;
+      break;
     }
-    return out;
   }
-  return value;
-}
-
-function rawString(value: unknown): string {
-  return typeof value === 'string' ? value : '';
-}
-
-export function encodePersistSlicesForStorage(slices: Record<string, unknown>): string {
-  const persistRaw: Record<string, string> = {};
-  for (const [key, value] of Object.entries(slices)) {
-    persistRaw[key] = marshalGoJSON(value);
+  if (!hasFile) {
+    entries.set('Data/Files/.keep', new Uint8Array());
   }
-  return marshalGoJSON(persistRaw);
 }
 
-export function seedCherryTemplate(entries: ArchiveEntries): void {
-  if (!hasFile(entries, 'data.json')) {
-    const skeleton = {
-      time: Date.now(),
-      version: 5,
-      localStorage: {},
-      indexedDB: {},
-    };
-    writeJson(entries, 'data.json', skeleton, false);
+function extractIndexedDbExtra(indexedDb: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(indexedDb)) {
+    if (k === 'topics' || k === 'message_blocks' || k === 'files') continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function redactPersistSlices(slices: Record<string, unknown>): Record<string, unknown> {
+  const clone = cloneJson(slices);
+  const llm = asRecord(clone.llm);
+  const providers = asArray(llm.providers);
+  for (const raw of providers) {
+    const provider = asRecord(raw);
+    if (typeof provider.apiKey === 'string' && provider.apiKey.length > 0) {
+      provider.apiKey = '***REDACTED***';
+    }
+  }
+  clone.llm = llm;
+  return clone;
+}
+
+export async function hydrateCherryFileHashes(files: IRFile[]): Promise<void> {
+  for (const file of files) {
+    file.hashSha256 = file.bytes.length ? await sha256Hex(file.bytes) : '';
   }
 }

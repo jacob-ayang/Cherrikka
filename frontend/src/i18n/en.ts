@@ -1,0 +1,27 @@
+import type { I18nText } from './types';
+
+export const en: I18nText = {
+  appTitle: 'CHERRIKKA / Local Conversion Console',
+  appSubtitle: 'Pure frontend runtime. Upload backup, choose source format, convert to opposite target format.',
+  sourceFileLabel: 'Source Backup ZIP',
+  sourceFileHint: 'Supports Cherry Studio / RikkaHub standard backup bundles',
+  sourceFormat: 'Source Format',
+  sourceFormatAuto: 'Auto Detect',
+  sourceFormatCherry: 'Cherry',
+  sourceFormatRikka: 'Rikka',
+  targetFormat: 'Target Format (Auto)',
+  targetPending: 'Pending detection',
+  targetCherry: 'Cherry',
+  targetRikka: 'Rikka',
+  redactSecrets: 'Redact Secrets',
+  convert: 'Convert',
+  converting: 'Converting...',
+  download: 'Download Result',
+  detectSource: 'Detected',
+  progress: 'Progress',
+  statusIdle: 'Idle',
+  statusDone: 'Done',
+  statusFailed: 'Failed',
+  errorPrefix: 'Error',
+  language: 'Language',
+};

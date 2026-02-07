@@ -1,27 +1,11 @@
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
-import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 
 let sqlPromise: Promise<SqlJsStatic> | null = null;
-
-function resolveWasmPath(): string {
-  if (typeof window !== 'undefined') {
-    return wasmUrl;
-  }
-  if (typeof process !== 'undefined' && typeof process.cwd === 'function') {
-    return `${process.cwd()}/node_modules/sql.js/dist/sql-wasm.wasm`;
-  }
-  return wasmUrl;
-}
 
 export async function getSqlJs(): Promise<SqlJsStatic> {
   if (!sqlPromise) {
     sqlPromise = initSqlJs({
-      locateFile: (file) => {
-        if (file.endsWith('.wasm')) {
-          return resolveWasmPath();
-        }
-        return file;
-      },
+      locateFile: (file) => `/${file}`,
     });
   }
   return sqlPromise;
@@ -29,8 +13,13 @@ export async function getSqlJs(): Promise<SqlJsStatic> {
 
 export async function openDatabase(bytes?: Uint8Array): Promise<Database> {
   const SQL = await getSqlJs();
-  if (bytes && bytes.length > 0) {
-    return new SQL.Database(bytes);
-  }
-  return new SQL.Database();
+  return bytes ? new SQL.Database(bytes) : new SQL.Database();
+}
+
+export function tableExists(db: Database, table: string): boolean {
+  const stmt = db.prepare(`SELECT COUNT(1) AS c FROM sqlite_master WHERE type='table' AND name=?`);
+  stmt.bind([table]);
+  const exists = stmt.step() ? Number(stmt.getAsObject().c) > 0 : false;
+  stmt.free();
+  return exists;
 }

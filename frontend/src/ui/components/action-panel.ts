@@ -1,61 +1,43 @@
-export interface ActionPanelRefs {
-  inspectButton: HTMLButtonElement;
-  validateButton: HTMLButtonElement;
+import type { I18nText } from '../../i18n/types';
+
+export interface ActionPanelHandle {
+  root: HTMLElement;
+  redactInput: HTMLInputElement;
   convertButton: HTMLButtonElement;
-  stage: HTMLElement;
-  percent: HTMLElement;
-  bar: HTMLElement;
-  message: HTMLElement;
-  log: HTMLElement;
+  setBusy: (busy: boolean) => void;
 }
 
-export function createActionPanel(): { root: HTMLElement; refs: ActionPanelRefs } {
+export function createActionPanel(text: I18nText): ActionPanelHandle {
   const root = document.createElement('section');
-  root.className = 'tui-panel';
-  root.innerHTML = `
-    <header class="panel-header">ACTIONS</header>
-    <div class="panel-body panel-actions">
-      <button id="btn-inspect" class="tui-button">[1] INSPECT</button>
-      <button id="btn-validate" class="tui-button">[2] VALIDATE</button>
-      <button id="btn-convert" class="tui-button tui-button-primary">[3] CONVERT + DOWNLOAD</button>
+  root.className = 'panel';
 
-      <div class="tui-progress">
-        <div class="progress-meta">
-          <span id="progress-stage">IDLE</span>
-          <span id="progress-percent">0%</span>
-        </div>
-        <div class="progress-track">
-          <div id="progress-bar" class="progress-bar"></div>
-        </div>
-        <p id="progress-message" class="progress-message">READY</p>
-      </div>
+  const row = document.createElement('div');
+  row.className = 'action-row';
 
-      <div class="tui-log-wrap">
-        <div class="log-title">LOG</div>
-        <pre id="progress-log" class="tui-log"></pre>
-      </div>
-    </div>
-  `;
+  const redactLabel = document.createElement('label');
+  redactLabel.className = 'checkbox';
 
-  return {
-    root,
-    refs: {
-      inspectButton: must<HTMLButtonElement>(root, '#btn-inspect'),
-      validateButton: must<HTMLButtonElement>(root, '#btn-validate'),
-      convertButton: must<HTMLButtonElement>(root, '#btn-convert'),
-      stage: must<HTMLElement>(root, '#progress-stage'),
-      percent: must<HTMLElement>(root, '#progress-percent'),
-      bar: must<HTMLElement>(root, '#progress-bar'),
-      message: must<HTMLElement>(root, '#progress-message'),
-      log: must<HTMLElement>(root, '#progress-log'),
-    },
+  const redactInput = document.createElement('input');
+  redactInput.type = 'checkbox';
+  redactInput.checked = false;
+
+  const redactText = document.createElement('span');
+  redactText.textContent = text.redactSecrets;
+
+  redactLabel.append(redactInput, redactText);
+
+  const convertButton = document.createElement('button');
+  convertButton.type = 'button';
+  convertButton.className = 'btn-primary';
+  convertButton.textContent = text.convert;
+
+  row.append(redactLabel, convertButton);
+  root.appendChild(row);
+
+  const setBusy = (busy: boolean) => {
+    convertButton.disabled = busy;
+    convertButton.textContent = busy ? text.converting : text.convert;
   };
-}
 
-function must<T extends Element>(root: ParentNode, selector: string): T {
-  const node = root.querySelector<T>(selector);
-  if (!node) {
-    throw new Error(`missing action panel element: ${selector}`);
-  }
-  return node;
+  return { root, redactInput, convertButton, setBusy };
 }

@@ -1,26 +1,18 @@
 import type { DetectResult } from '../ir/types';
-import type { ArchiveEntries } from './archive';
-import { hasFile, hasPrefix } from './archive';
 
-export function detectFormat(entries: ArchiveEntries): DetectResult {
-  const hints: string[] = [];
-  const hasDataJson = hasFile(entries, 'data.json');
-  const hasDataDir = hasPrefix(entries, 'Data');
-  const hasSettingsJson = hasFile(entries, 'settings.json');
-  const hasRikkaDb = hasFile(entries, 'rikka_hub.db');
-  const hasUploadDir = hasPrefix(entries, 'upload');
+export function detectFormat(entries: Map<string, Uint8Array>): DetectResult {
+  const names = [...entries.keys()];
+  const hasDataJson = names.includes('data.json');
+  const hasDataDir = names.some((n) => n.startsWith('Data/'));
+  const hasSettings = names.includes('settings.json');
+  const hasDb = names.includes('rikka_hub.db');
+  const hasUpload = names.some((n) => n.startsWith('upload/'));
 
-  if (hasDataJson) hints.push('data.json');
-  if (hasDataDir) hints.push('Data/');
-  if (hasSettingsJson) hints.push('settings.json');
-  if (hasRikkaDb) hints.push('rikka_hub.db');
-  if (hasUploadDir) hints.push('upload/');
-
-  if (hasDataJson && hasDataDir) {
-    return { format: 'cherry', hints };
-  }
-  if (hasSettingsJson && (hasRikkaDb || hasUploadDir)) {
+  if (hasDataJson && hasDataDir) return { format: 'cherry', hints: ['data.json', 'Data/'] };
+  if (hasSettings && hasDb) {
+    const hints = ['settings.json', 'rikka_hub.db'];
+    if (hasUpload) hints.push('upload/');
     return { format: 'rikka', hints };
   }
-  return { format: 'unknown', hints };
+  return { format: 'unknown', hints: [] };
 }

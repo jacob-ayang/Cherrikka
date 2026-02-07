@@ -1,32 +1,21 @@
-const SECRET_TOKENS = [
-  'api_key',
-  'apikey',
-  'token',
-  'secret',
-  'password',
-  'access_key',
-  'secretaccesskey',
-];
+const SECRET_KEYS = ['apiKey', 'password', 'secret', 'token', 'accessKey', 'secretAccessKey'];
 
-export function shouldRedactKey(key: string): boolean {
-  const normalized = key.trim().toLowerCase();
-  return SECRET_TOKENS.some((token) => normalized.includes(token));
+export function redactSecrets<T>(value: T): T {
+  return walk(value) as T;
 }
 
-export function redactAny(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => redactAny(item));
-  }
+function walk(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => walk(item));
   if (value && typeof value === 'object') {
-    const output: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      if (shouldRedactKey(key)) {
-        output[key] = '***REDACTED***';
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (SECRET_KEYS.some((key) => k.toLowerCase().includes(key.toLowerCase()))) {
+        out[k] = typeof v === 'string' && v.length > 0 ? '***REDACTED***' : v;
       } else {
-        output[key] = redactAny(child);
+        out[k] = walk(v);
       }
     }
-    return output;
+    return out;
   }
   return value;
 }

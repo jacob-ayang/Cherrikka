@@ -1,0 +1,27 @@
+import type { I18nText } from './types';
+
+export const zh: I18nText = {
+  appTitle: 'CHERRIKKA / 本地转换终端',
+  appSubtitle: '纯前端运行。上传备份，选择源格式，自动生成反向目标格式并转换。',
+  sourceFileLabel: '源备份 ZIP',
+  sourceFileHint: '支持 Cherry Studio / RikkaHub 标准备份包',
+  sourceFormat: '源格式',
+  sourceFormatAuto: '自动识别',
+  sourceFormatCherry: 'Cherry',
+  sourceFormatRikka: 'Rikka',
+  targetFormat: '目标格式（自动）',
+  targetPending: '等待识别',
+  targetCherry: 'Cherry',
+  targetRikka: 'Rikka',
+  redactSecrets: '脱敏密钥',
+  convert: '开始转换',
+  converting: '转换中...',
+  download: '下载结果',
+  detectSource: '识别结果',
+  progress: '进度',
+  statusIdle: '待命',
+  statusDone: '完成',
+  statusFailed: '失败',
+  errorPrefix: '错误',
+  language: '语言',
+};

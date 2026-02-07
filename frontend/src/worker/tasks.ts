@@ -1,25 +1,19 @@
-import { convert, inspect, validate } from '../engine/service';
+import { convert, detectSource } from '../engine/service';
 import type { ProgressEvent } from '../engine/ir/types';
-import type { ConvertPayload, InspectPayload, ValidatePayload, WorkerCommand } from './protocol';
+import type { ConvertPayload, DetectPayload, WorkerCommand } from './protocol';
 
 export type ProgressSink = (event: ProgressEvent) => void;
 
-export async function runTask(
-  command: WorkerCommand,
-  payload: unknown,
-  pushProgress: ProgressSink,
-): Promise<unknown> {
-  if (command === 'inspect') {
-    const inspectPayload = payload as InspectPayload;
-    return inspect(inspectPayload.file, pushProgress);
+export async function runTask(command: WorkerCommand, payload: unknown, pushProgress: ProgressSink): Promise<unknown> {
+  if (command === 'detect') {
+    const { file } = payload as DetectPayload;
+    return detectSource(file);
   }
-  if (command === 'validate') {
-    const validatePayload = payload as ValidatePayload;
-    return validate(validatePayload.file, pushProgress);
-  }
+
   if (command === 'convert') {
-    const convertPayload = payload as ConvertPayload;
-    return convert(convertPayload.request, pushProgress);
+    const { request } = payload as ConvertPayload;
+    return convert(request, pushProgress);
   }
+
   throw new Error(`unsupported command: ${command}`);
 }
