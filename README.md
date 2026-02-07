@@ -23,6 +23,17 @@ If your existing Vercel project still shows 404 after deploy:
 2. Set `Root Directory` to repo root (empty) to use root `vercel.json`, or set it to `frontend` and keep frontend config.
 3. Trigger a redeploy.
 
+## GitHub Pages Deploy
+
+This repo includes `.github/workflows/deploy-pages.yml` and will auto-deploy `frontend/dist` to GitHub Pages on every push to `main`.
+
+1. Open GitHub repo settings: `Settings -> Pages`.
+2. Set `Source` to `GitHub Actions`.
+3. Push to `main` (or manually run the workflow from `Actions`).
+
+After deployment, the site URL is:
+- `https://<your-github-username>.github.io/Cherrikka/`
+
 ## Commands
 
 - `cherrikka inspect --input <backup.zip>`
