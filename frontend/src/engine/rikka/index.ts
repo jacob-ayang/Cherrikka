@@ -2,7 +2,7 @@ import type { Database } from 'sql.js';
 
 import { readJsonEntry, writeJsonEntry } from '../backup/zip';
 import type { BackupIR, IRConversation, IRFile, IRMessage, IRPart } from '../ir/types';
-import { asArray, asBoolean, asNumber, asRecord, asString, cloneJson, dedupeStrings, nowIso, normalizeText, truncate } from '../util/common';
+import { asArray, asBoolean, asNumber, asRecord, asString, cloneJson, dedupeStrings, nowIso, normalizeText, toRfc3339, truncate } from '../util/common';
 import { basename, ensureOpenAIBaseUrl, extname, guessLogicalType } from '../util/file';
 import { marshalGoJSON } from '../util/go_json';
 import { sha256Hex } from '../util/hash';
@@ -21,8 +21,14 @@ export async function parseRikka(entries: Map<string, Uint8Array>): Promise<Back
   const files = await parseRikkaFiles(db, entries);
   const conversations = parseRikkaConversations(db, files.byRelative);
   const assistants = parseRikkaAssistants(settings);
+  const unsupported = extractRikkaUnsupported(settings);
 
   db.close();
+
+  const warnings = [...files.warnings];
+  if (Object.keys(unsupported).length > 0) {
+    warnings.push('unsupported-isolated:rikka.settings');
+  }
 
   return {
     sourceApp: 'rikkahub',
@@ -34,8 +40,8 @@ export async function parseRikka(entries: Map<string, Uint8Array>): Promise<Back
     config: {
       'rikka.settings': cloneJson(settings),
     },
-    opaque: {},
-    warnings: files.warnings,
+    opaque: Object.keys(unsupported).length > 0 ? { 'interop.rikka.unsupported': unsupported } : {},
+    warnings: dedupeStrings(warnings),
   };
 }
 
@@ -97,8 +103,8 @@ async function parseRikkaFiles(
           logicalType: guessLogicalType(mime, extname(display || rel)),
           relativeSrc: rel,
           size: size || bytes.length,
-          createdAt: new Date(createdAt).toISOString(),
-          updatedAt: new Date(updatedAt).toISOString(),
+          createdAt: toRfc3339(createdAt),
+          updatedAt: toRfc3339(updatedAt),
           hashSha256: bytes.length ? await sha256Hex(bytes) : '',
           missing: bytes.length === 0,
           orphan: false,
@@ -126,8 +132,8 @@ async function parseRikkaFiles(
       logicalType: guessLogicalType('', extname(name)),
       relativeSrc: path,
       size: bytes.length,
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
+      createdAt: toRfc3339(Date.now()),
+      updatedAt: toRfc3339(Date.now()),
       hashSha256: bytes.length ? await sha256Hex(bytes) : '',
       missing: false,
       orphan: true,
@@ -166,8 +172,8 @@ function parseRikkaConversations(db: Database, filesByRelative: Map<string, IRFi
         id,
         assistantId,
         title,
-        createdAt: new Date(createAt).toISOString(),
-        updatedAt: new Date(updateAt).toISOString(),
+        createdAt: toRfc3339(createAt),
+        updatedAt: toRfc3339(updateAt),
         messages,
         opaque: {
           truncateIndex: Number(row[5]) || -1,
@@ -220,11 +226,15 @@ function parseRikkaMessage(message: Record<string, unknown>, filesByRelative: Ma
 }
 
 function parseRikkaPart(part: Record<string, unknown>, filesByRelative: Map<string, IRFile>): IRPart {
+  const metadata: Record<string, unknown> = {
+    rikkaType: asString(part.type),
+  };
+
   if (typeof part.text === 'string') {
-    return { type: 'text', content: part.text };
+    return { type: 'text', content: part.text, metadata };
   }
   if (typeof part.reasoning === 'string') {
-    return { type: 'reasoning', content: part.reasoning };
+    return { type: 'reasoning', content: part.reasoning, metadata };
   }
   if (typeof part.toolName === 'string' && typeof part.input === 'string') {
     return {
@@ -233,6 +243,7 @@ function parseRikkaPart(part: Record<string, unknown>, filesByRelative: Map<stri
       toolCallId: asString(part.toolCallId),
       input: asString(part.input),
       output: parseRikkaToolOutput(part.output),
+      metadata,
     };
   }
 
@@ -245,6 +256,7 @@ function parseRikkaPart(part: Record<string, unknown>, filesByRelative: Map<stri
       mediaUrl: asString(part.url),
       name: asString(part.fileName) || linked?.name || basename(rel),
       mimeType: asString(part.mime) || linked?.mimeType || 'application/octet-stream',
+      metadata,
     };
   }
 
@@ -252,10 +264,11 @@ function parseRikkaPart(part: Record<string, unknown>, filesByRelative: Map<stri
     return {
       type: inferPartType(part),
       mediaUrl: asString(part.url),
+      metadata,
     };
   }
 
-  return { type: 'text', content: '[unsupported rikka part]' };
+  return { type: 'text', content: '[unsupported rikka part]', metadata: { ...metadata, raw: part } };
 }
 
 function parseRikkaToolOutput(value: unknown): IRPart[] {
@@ -317,6 +330,8 @@ function buildRikkaSettings(ir: BackupIR, warnings: string[]): Record<string, un
 
   const fromCherry = asRecord(ir.config['cherry.persistSlices']);
   const llm = asRecord(fromCherry.llm);
+  const cherrySettings = asRecord(ir.config['cherry.settings']);
+  const persistSettings = asRecord(fromCherry.settings);
   const providersRaw = asArray(llm.providers);
   const modelAlias = new Map<string, string>();
 
@@ -344,12 +359,12 @@ function buildRikkaSettings(ir: BackupIR, warnings: string[]): Record<string, un
     translateModeId: pickCherrySelectedModel(llm, 'translateModel', fallbackModel, modelAlias),
     suggestionModelId: pickCherrySelectedModel(llm, 'quickModel', fallbackModel, modelAlias),
     imageGenerationModelId: fallbackModel,
-    enableWebSearch: false,
-    mcpServers: [],
-    ttsProviders: [],
-    selectedTTSProviderId: '',
+    enableWebSearch: asBoolean(cherrySettings.enableWebSearch, false),
+    mcpServers: asArray(cherrySettings.mcpServers),
+    ttsProviders: cloneJson(asArray(cherrySettings.ttsProviders)),
+    selectedTTSProviderId: pickFirstString(cherrySettings.selectedTTSProviderId),
     webDavConfig: {
-      path: '/cherrikka',
+      path: pickFirstString(cherrySettings.webdavPath, '/cherrikka'),
       items: ['DATABASE', 'FILES'],
     },
     s3Config: {
@@ -362,6 +377,42 @@ function buildRikkaSettings(ir: BackupIR, warnings: string[]): Record<string, un
       items: ['DATABASE', 'FILES'],
     },
   };
+
+  if (Object.keys(persistSettings).length > 0) {
+    if (!settings.selectedTTSProviderId) {
+      settings.selectedTTSProviderId = pickFirstString(persistSettings.selectedTTSProviderId);
+    }
+    if (asArray(settings.ttsProviders).length === 0) {
+      settings.ttsProviders = cloneJson(asArray(persistSettings.ttsProviders));
+    }
+  }
+  if (Object.keys(cherrySettings).length > 0) {
+    const webDav = asRecord(settings.webDavConfig);
+    if (pickFirstString(cherrySettings.webdavHost)) {
+      webDav.url = pickFirstString(cherrySettings.webdavHost);
+    }
+    if (pickFirstString(cherrySettings.webdavUser)) {
+      webDav.username = pickFirstString(cherrySettings.webdavUser);
+    }
+    if (pickFirstString(cherrySettings.webdavPass)) {
+      webDav.password = pickFirstString(cherrySettings.webdavPass);
+    }
+    if (pickFirstString(cherrySettings.webdavPath)) {
+      webDav.path = pickFirstString(cherrySettings.webdavPath);
+    }
+    settings.webDavConfig = webDav;
+    if (Object.keys(asRecord(cherrySettings.s3)).length > 0) {
+      const s3 = cloneJson(asRecord(cherrySettings.s3));
+      if (!Array.isArray(s3.items)) s3.items = ['DATABASE', 'FILES'];
+      settings.s3Config = s3;
+    }
+    if (!settings.selectedTTSProviderId) {
+      settings.selectedTTSProviderId = pickFirstString(cherrySettings.selectedTTSProviderId);
+    }
+    if (asArray(settings.ttsProviders).length === 0) {
+      settings.ttsProviders = cloneJson(asArray(cherrySettings.ttsProviders));
+    }
+  }
 
   normalizeRikkaSettings(settings, warnings);
   return settings;
@@ -439,62 +490,73 @@ function normalizeProvider(
   warnings: string[],
   modelAlias?: Map<string, string>,
 ): Record<string, unknown> {
-  const providerSeed = asString(provider.id) || asString(provider.name) || asString(provider.type) || newId();
-  const providerId = ensureUUID(asString(provider.id), `provider:${providerSeed}`);
+  const providerSeed = pickFirstString(provider.id, provider.name, provider.type, newId());
+  const providerId = ensureUUID(pickFirstString(provider.id), `provider:${providerSeed}`);
   const out: Record<string, unknown> = {
     id: providerId,
-    name: asString(provider.name) || 'Imported Provider',
+    name: pickFirstString(provider.name, 'Imported Provider'),
   };
-  const mappedType = mapProviderTypeToRikka(asString(provider.type));
+  const mappedType = mapProviderTypeToRikka(pickFirstString(provider.type));
   out.type = mappedType || 'openai';
 
-  const rawBase = asString(provider.baseUrl) || asString(provider.apiHost);
+  const rawBase = pickFirstString(provider.baseUrl, provider.apiHost);
   if (out.type === 'openai') {
     out.baseUrl = ensureOpenAIBaseUrl(rawBase || 'https://api.openai.com/v1');
-    const chatPath = asString(provider.chatCompletionsPath) || asString(provider.apiPath) || '/chat/completions';
+    const chatPath = normalizeOpenAIChatPath(
+      pickFirstString(provider.chatCompletionsPath, provider.apiPath, '/chat/completions'),
+      pickFirstString(out.baseUrl),
+    );
     out.chatCompletionsPath = chatPath;
-    if (typeof provider.apiKey === 'string' && provider.apiKey.length > 0) out.apiKey = provider.apiKey;
+    if (pickFirstString(provider.apiKey)) out.apiKey = pickFirstString(provider.apiKey);
     if (typeof provider.useResponseApi === 'boolean') out.useResponseApi = provider.useResponseApi;
   } else if (out.type === 'claude') {
     out.baseUrl = rawBase || 'https://api.anthropic.com/v1';
-    if (typeof provider.apiKey === 'string' && provider.apiKey.length > 0) out.apiKey = provider.apiKey;
+    if (pickFirstString(provider.apiKey)) out.apiKey = pickFirstString(provider.apiKey);
   } else if (out.type === 'google') {
     out.baseUrl = rawBase || 'https://generativelanguage.googleapis.com/v1beta';
-    if (typeof provider.apiKey === 'string' && provider.apiKey.length > 0) out.apiKey = provider.apiKey;
+    if (pickFirstString(provider.apiKey)) out.apiKey = pickFirstString(provider.apiKey);
     if (typeof provider.vertexAI === 'boolean') out.vertexAI = provider.vertexAI;
-    if (typeof provider.privateKey === 'string' && provider.privateKey.length > 0) out.privateKey = provider.privateKey;
-    if (typeof provider.serviceAccountEmail === 'string' && provider.serviceAccountEmail.length > 0) out.serviceAccountEmail = provider.serviceAccountEmail;
-    if (typeof provider.location === 'string' && provider.location.length > 0) out.location = provider.location;
-    if (typeof provider.projectId === 'string' && provider.projectId.length > 0) out.projectId = provider.projectId;
+    if (pickFirstString(provider.privateKey)) out.privateKey = pickFirstString(provider.privateKey);
+    if (pickFirstString(provider.serviceAccountEmail)) out.serviceAccountEmail = pickFirstString(provider.serviceAccountEmail);
+    if (pickFirstString(provider.location)) out.location = pickFirstString(provider.location);
+    if (pickFirstString(provider.projectId)) out.projectId = pickFirstString(provider.projectId);
   } else {
     out.baseUrl = rawBase;
   }
 
   const models = asArray(provider.models).map((raw) => {
     const m = asRecord(raw);
-    const modelRef = asString(m.modelId) || asString(m.id) || asString(m.name) || asString(m.displayName) || newId();
-    const id = ensureUUID(asString(m.id), `model:${providerId}:${modelRef}`);
-    const modelType = normalizeRikkaModelType(asString(m.type), warnings);
-    const model = {
+    const modelRef = pickFirstString(m.modelId, m.id, m.name, m.displayName, newId());
+    const id = ensureUUID(pickFirstString(m.id), `model:${providerId}:${modelRef}`);
+    const modelType = normalizeRikkaModelType(pickFirstString(m.type), warnings);
+    const model: Record<string, unknown> = {
       id,
-      modelId: asString(m.modelId) || modelRef,
-      displayName: asString(m.displayName) || asString(m.name) || asString(m.modelId) || modelRef,
+      modelId: pickFirstString(m.modelId, modelRef),
+      displayName: pickFirstString(m.displayName, m.name, m.modelId, modelRef),
       type: modelType,
     };
-    const inputModalities = asArray(m.inputModalities);
+    const inputModalities = normalizeModelModalities(m.inputModalities);
     if (inputModalities.length > 0) {
-      (model as Record<string, unknown>).inputModalities = inputModalities;
+      model.inputModalities = inputModalities;
     }
-    const outputModalities = asArray(m.outputModalities);
+    const outputModalities = normalizeModelModalities(m.outputModalities);
     if (outputModalities.length > 0) {
-      (model as Record<string, unknown>).outputModalities = outputModalities;
+      model.outputModalities = outputModalities;
+    }
+    const abilities = normalizeModelAbilities(m.abilities);
+    if (abilities.length > 0) {
+      model.abilities = abilities;
+    }
+    const tools = normalizeModelTools(m.tools);
+    if (tools.length > 0) {
+      model.tools = tools;
     }
     registerModelAlias(modelAlias, modelRef, id);
-    registerModelAlias(modelAlias, asString(m.id), id);
-    registerModelAlias(modelAlias, asString(m.displayName), id);
-    registerModelAlias(modelAlias, asString(m.name), id);
-    registerModelAlias(modelAlias, asString(model.modelId), id);
-    registerModelAlias(modelAlias, asString(model.displayName), id);
+    registerModelAlias(modelAlias, pickFirstString(m.id), id);
+    registerModelAlias(modelAlias, pickFirstString(m.displayName), id);
+    registerModelAlias(modelAlias, pickFirstString(m.name), id);
+    registerModelAlias(modelAlias, pickFirstString(model.modelId), id);
+    registerModelAlias(modelAlias, pickFirstString(model.displayName), id);
     registerModelAlias(modelAlias, id, id);
     return model;
   });
@@ -503,10 +565,10 @@ function normalizeProvider(
   const enabled = asBoolean(provider.enabled, true) && models.length > 0 && Boolean(mappedType);
   out.enabled = enabled;
   if (!mappedType) {
-    warnings.push(`provider-invalid-disabled:${asString(out.name)}:unsupported-type`);
+    warnings.push(`provider-invalid-disabled:${pickFirstString(out.name)}:unsupported-type`);
   }
-  if (asBoolean(provider.enabled, true) && models.length === 0) {
-    warnings.push(`provider-invalid-disabled:${asString(out.name)}:no-models`);
+  if (models.length === 0) {
+    warnings.push(`provider-invalid-disabled:${pickFirstString(out.name)}:no-models`);
   }
 
   return out;
@@ -565,7 +627,7 @@ function registerModelAlias(alias: Map<string, string> | undefined, key: string,
 function normalizeRikkaModelType(rawType: string, warnings: string[]): string {
   const clean = rawType.trim().toUpperCase();
   if (!clean) return 'CHAT';
-  const allowed = new Set(['CHAT', 'IMAGE', 'VIDEO', 'AUDIO', 'DOCUMENT']);
+  const allowed = new Set(['CHAT', 'IMAGE', 'EMBEDDING']);
   if (allowed.has(clean)) return clean;
   warnings.push(`normalized unsupported model type to CHAT: ${rawType}`);
   return 'CHAT';
@@ -578,7 +640,7 @@ function pickCherrySelectedModel(
   modelAlias: Map<string, string>,
 ): string {
   const model = asRecord(llm[key]);
-  const id = asString(model.id) || asString(model.modelId) || asString(model.name) || asString(model.displayName);
+  const id = pickFirstString(model.id, model.modelId, model.name, model.displayName);
   const resolved = resolveModelAlias(id, modelAlias);
   return resolved || fallback;
 }
@@ -598,6 +660,93 @@ function mapProviderTypeToRikka(rawType: string): string {
   return '';
 }
 
+function pickFirstString(...values: unknown[]): string {
+  for (const value of values) {
+    const candidate = asString(value).trim();
+    if (candidate) return candidate;
+  }
+  return '';
+}
+
+function normalizeOpenAIChatPath(chatPath: string, baseUrl: string): string {
+  let normalized = chatPath.trim() || '/chat/completions';
+  if (!normalized.startsWith('/')) normalized = `/${normalized}`;
+  if (openAIBaseHasVersion(baseUrl) && normalized.toLowerCase().startsWith('/v1/')) {
+    normalized = normalized.slice('/v1'.length) || '/chat/completions';
+  }
+  return normalized;
+}
+
+function openAIBaseHasVersion(baseUrl: string): boolean {
+  if (!baseUrl) return false;
+  try {
+    const parsed = new URL(baseUrl);
+    const path = parsed.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+    return path.endsWith('v1') || path.endsWith('v1beta');
+  } catch {
+    return false;
+  }
+}
+
+function normalizeModelModalities(value: unknown): string[] {
+  const out = new Set<string>();
+  for (const item of asArray(value)) {
+    const text = pickFirstString(item).toUpperCase();
+    if (text === 'TEXT' || text === 'IMAGE') out.add(text);
+  }
+  return [...out];
+}
+
+function normalizeModelAbilities(value: unknown): string[] {
+  const out = new Set<string>();
+  for (const item of asArray(value)) {
+    const text = pickFirstString(item).toUpperCase();
+    if (text === 'TOOL' || text === 'REASONING') out.add(text);
+  }
+  return [...out];
+}
+
+function normalizeModelTools(value: unknown): string[] {
+  const out = new Set<string>();
+  for (const item of asArray(value)) {
+    const text = pickFirstString(item).toLowerCase();
+    if (text === 'search' || text === 'url_context') out.add(text);
+  }
+  return [...out];
+}
+
+function extractRikkaUnsupported(settings: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of ['modeInjections', 'lorebooks', 'memoryEntities', 'memories']) {
+    if (isMeaningfulUnsupported(settings[key])) out[key] = cloneJson(settings[key]);
+  }
+
+  const assistantsOut: Record<string, unknown>[] = [];
+  for (const item of asArray(settings.assistants)) {
+    const assistant = asRecord(item);
+    const entry: Record<string, unknown> = {};
+    const id = pickFirstString(assistant.id);
+    const name = pickFirstString(assistant.name);
+    if (id) entry.id = id;
+    if (name) entry.name = name;
+    for (const key of ['modeInjectionIds', 'lorebookIds', 'enableMemory', 'useGlobalMemory', 'regexes', 'localTools']) {
+      if (isMeaningfulUnsupported(assistant[key])) entry[key] = cloneJson(assistant[key]);
+    }
+    if (Object.keys(entry).length > 0) assistantsOut.push(entry);
+  }
+  if (assistantsOut.length > 0) out.assistants = assistantsOut;
+  return out;
+}
+
+function isMeaningfulUnsupported(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(asRecord(value)).length > 0;
+  return true;
+}
+
 function uniqueAssistantName(name: string, used: Set<string>, warnings: string[]): string {
   const trimmed = name.trim() || 'Imported Assistant';
   if (!used.has(trimmed)) {
@@ -612,7 +761,7 @@ function uniqueAssistantName(name: string, used: Set<string>, warnings: string[]
     candidate = `${trimmed} (${index})`;
   }
   used.add(candidate);
-  warnings.push(`assistant-name-conflict-renamed:${trimmed}->${candidate}`);
+  warnings.push(`assistant name conflict renamed: ${trimmed} -> ${candidate}`);
   return candidate;
 }
 

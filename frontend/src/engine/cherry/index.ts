@@ -1,6 +1,6 @@
 import { readJsonEntry, writeJsonEntry } from '../backup/zip';
 import type { BackupIR, IRConversation, IRFile, IRMessage, IRPart } from '../ir/types';
-import { asArray, asRecord, asString, cloneJson, dedupeStrings, nowIso, normalizeText, truncate } from '../util/common';
+import { asArray, asRecord, asString, cloneJson, dedupeStrings, nowIso, normalizeText, toRfc3339, truncate } from '../util/common';
 import { extname, guessLogicalType, normalizePath } from '../util/file';
 import { marshalGoJSON } from '../util/go_json';
 import { sha256Hex } from '../util/hash';
@@ -24,10 +24,13 @@ export function parseCherry(entries: Map<string, Uint8Array>): BackupIR {
 
   const persistSlices = decodePersistSlices(asString(localStorage['persist:cherry-studio']));
   const assistantsSlice = asRecord(persistSlices.assistants);
+  const cherrySettings = asRecord(persistSlices.settings);
+  const cherryLlm = asRecord(persistSlices.llm);
 
   const assistants = parseAssistants(assistantsSlice);
   const filesById = parseCherryFiles(entries, asArray(indexedDB.files));
   const conversations = parseCherryConversations(asArray(indexedDB.topics), asArray(indexedDB.message_blocks), filesById);
+  const unsupported = extractCherryUnsupported(cherrySettings, persistSlices);
 
   const ir: BackupIR = {
     sourceApp: 'cherry-studio',
@@ -39,14 +42,19 @@ export function parseCherry(entries: Map<string, Uint8Array>): BackupIR {
     config: {
       'cherry.localStorage': cloneJson(localStorage),
       'cherry.persistSlices': persistSlices,
+      'cherry.settings': cherrySettings,
+      'cherry.llm': cherryLlm,
       'cherry.indexedDB.extra': extractIndexedDbExtra(indexedDB),
     },
-    opaque: {},
+    opaque: Object.keys(unsupported).length > 0 ? { 'interop.cherry.unsupported': unsupported } : {},
     warnings: [],
   };
 
   for (const file of ir.files) {
     if (file.missing) ir.warnings.push(`missing cherry file payload: ${file.id}`);
+  }
+  if (Object.keys(unsupported).length > 0) {
+    ir.warnings.push('unsupported-isolated:cherry.settings');
   }
 
   return ir;
@@ -59,7 +67,7 @@ export function buildCherry(
   redactSecrets: boolean,
 ): string[] {
   const warnings: string[] = [];
-  const persistSlices = buildPersistSlices(ir, redactSecrets);
+  const persistSlices = buildPersistSlices(ir, redactSecrets, warnings);
   const fileTable = materializeCherryFiles(ir.files, outEntries, idMap, warnings);
 
   const topics: Record<string, unknown>[] = [];
@@ -87,7 +95,7 @@ export function buildCherry(
         blocks.push({
           id: blockId,
           messageId: msgId,
-          createdAt: nowIso(),
+          createdAt: toRfc3339(Date.now()),
           status: 'success',
           type: 'main_text',
           content: '',
@@ -99,7 +107,7 @@ export function buildCherry(
         role: normalizeRole(message.role),
         assistantId: conversation.assistantId,
         topicId,
-        createdAt: message.createdAt || nowIso(),
+        createdAt: fallbackTime(message.createdAt),
         status: 'success',
         blocks: blockIds,
       });
@@ -109,8 +117,8 @@ export function buildCherry(
       id: topicId,
       name: normalizeConversationTitle(conversation.title),
       assistantId: conversation.assistantId,
-      createdAt: conversation.createdAt || nowIso(),
-      updatedAt: conversation.updatedAt || nowIso(),
+      createdAt: fallbackTime(conversation.createdAt),
+      updatedAt: fallbackTime(conversation.updatedAt),
       messages: msgRows,
     });
   }
@@ -186,8 +194,8 @@ function parseCherryFiles(
       logicalType: guessLogicalType(mime, ext),
       relativeSrc: relPath,
       size: bytes.length,
-      createdAt: normalizeTimestamp(row.created_at) || normalizeTimestamp(row.createdAt) || nowIso(),
-      updatedAt: normalizeTimestamp(row.updated_at) || normalizeTimestamp(row.updatedAt) || nowIso(),
+      createdAt: normalizeTimestamp(row.created_at) || normalizeTimestamp(row.createdAt) || fallbackTime(''),
+      updatedAt: normalizeTimestamp(row.updated_at) || normalizeTimestamp(row.updatedAt) || fallbackTime(''),
       hashSha256: '',
       missing: bytes.length === 0,
       orphan: false,
@@ -215,8 +223,8 @@ function parseCherryFiles(
       logicalType: guessLogicalType('', ext),
       relativeSrc: key,
       size: bytes.length,
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
+      createdAt: fallbackTime(''),
+      updatedAt: fallbackTime(''),
       hashSha256: '',
       missing: bytes.length === 0,
       orphan: true,
@@ -250,8 +258,8 @@ function parseCherryConversations(
       id: asString(topic.id) || newId(),
       assistantId: asString(topic.assistantId),
       title: asString(topic.name),
-      createdAt: asString(topic.createdAt) || nowIso(),
-      updatedAt: asString(topic.updatedAt) || nowIso(),
+      createdAt: fallbackTime(asString(topic.createdAt)),
+      updatedAt: fallbackTime(asString(topic.updatedAt)),
       messages: [],
       opaque: {},
     };
@@ -272,7 +280,7 @@ function parseCherryConversations(
       conv.messages.push({
         id: asString(msg.id) || newId(),
         role: normalizeRole(asString(msg.role)),
-        createdAt: asString(msg.createdAt) || nowIso(),
+        createdAt: fallbackTime(asString(msg.createdAt)),
         modelId: asString(msg.modelId),
         parts,
         opaque: {},
@@ -361,9 +369,12 @@ function partToCherryBlock(
   const base: Record<string, unknown> = {
     id: blockId,
     messageId,
-    createdAt: nowIso(),
+    createdAt: fallbackTime(''),
     status: 'success',
   };
+  if (part.metadata && Object.keys(part.metadata).length > 0) {
+    base.metadata = cloneJson(part.metadata);
+  }
 
   if (part.type === 'reasoning') {
     return { ...base, type: 'thinking', content: part.content ?? '' };
@@ -445,7 +456,7 @@ function materializeCherryFiles(
       size: bytes.length,
       ext,
       type: file.logicalType || file.mimeType || 'other',
-      created_at: file.createdAt || nowIso(),
+      created_at: fallbackTime(file.createdAt),
       count: 1,
     });
   }
@@ -453,7 +464,7 @@ function materializeCherryFiles(
   return fileTable;
 }
 
-function buildPersistSlices(ir: BackupIR, redact: boolean): Record<string, unknown> {
+function buildPersistSlices(ir: BackupIR, redact: boolean, warnings: string[]): Record<string, unknown> {
   const existing = asRecord(ir.config['cherry.persistSlices']);
   const slices: Record<string, unknown> = Object.keys(existing).length > 0 ? cloneJson(existing) : {};
 
@@ -476,7 +487,7 @@ function buildPersistSlices(ir: BackupIR, redact: boolean): Record<string, unkno
     unifiedListOrder: [],
   };
 
-  slices.llm = buildCherryLlm(ir);
+  slices.llm = buildCherryLlm(ir, warnings);
   slices.settings = asRecord(slices.settings);
   slices.backup = asRecord(slices.backup);
 
@@ -504,8 +515,8 @@ function buildCherryAssistants(assistants: BackupIR['assistants'], conversations
       id: conv.id,
       assistantId: assistant.id,
       name: normalizeConversationTitle(conv.title),
-      createdAt: conv.createdAt || nowIso(),
-      updatedAt: conv.updatedAt || nowIso(),
+      createdAt: fallbackTime(conv.createdAt),
+      updatedAt: fallbackTime(conv.updatedAt),
       messages: [],
       isNameManuallyEdited: true,
     }));
@@ -523,7 +534,7 @@ function buildCherryAssistants(assistants: BackupIR['assistants'], conversations
   });
 }
 
-function buildCherryLlm(ir: BackupIR): Record<string, unknown> {
+function buildCherryLlm(ir: BackupIR, warnings: string[]): Record<string, unknown> {
   const fromCherry = asRecord(asRecord(ir.config['cherry.persistSlices']).llm);
   if (Object.keys(fromCherry).length > 0) {
     return cloneJson(fromCherry);
@@ -534,26 +545,35 @@ function buildCherryLlm(ir: BackupIR): Record<string, unknown> {
     const provider = asRecord(raw);
     const providerId = asString(provider.id) || newId();
     const mappedType = mapProviderTypeToCherry(asString(provider.type));
+    const models = asArray(provider.models).map((mRaw) => {
+      const m = asRecord(mRaw);
+      const id = asString(m.id) || asString(m.modelId) || newId();
+      const out: Record<string, unknown> = {
+        id,
+        modelId: asString(m.modelId) || id,
+        name: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
+        displayName: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
+        provider: providerId,
+        group: 'default',
+        type: 'CHAT',
+      };
+      if (Array.isArray(m.abilities) && m.abilities.length > 0) out.abilities = cloneJson(m.abilities);
+      if (Array.isArray(m.inputModalities) && m.inputModalities.length > 0) out.inputModalities = cloneJson(m.inputModalities);
+      if (Array.isArray(m.outputModalities) && m.outputModalities.length > 0) out.outputModalities = cloneJson(m.outputModalities);
+      if (Array.isArray(m.tools) && m.tools.length > 0) out.tools = cloneJson(m.tools);
+      return out;
+    });
+    if (models.length === 0) {
+      warnings.push(`provider-invalid-disabled:${asString(provider.name) || providerId}:no-models`);
+    }
     return {
       id: providerId,
       name: asString(provider.name) || 'Imported Provider',
       type: mappedType,
       apiHost: asString(provider.baseUrl),
       baseUrl: asString(provider.baseUrl),
-      enabled: provider.enabled !== false,
-      models: asArray(provider.models).map((mRaw) => {
-        const m = asRecord(mRaw);
-        const id = asString(m.id) || asString(m.modelId) || newId();
-        return {
-          id,
-          modelId: asString(m.modelId) || id,
-          name: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
-          displayName: asString(m.displayName) || asString(m.name) || asString(m.modelId) || id,
-          provider: providerId,
-          group: 'default',
-          type: 'CHAT',
-        };
-      }),
+      enabled: provider.enabled !== false && models.length > 0,
+      models,
     };
   });
 
@@ -626,10 +646,18 @@ function normalizeConversationTitle(input: string): string {
 
 function normalizeTimestamp(value: unknown): string {
   const s = asString(value);
-  if (s) return s;
+  if (s) return fallbackTime(s);
   const n = Number(value);
-  if (Number.isFinite(n) && n > 0) return new Date(n).toISOString();
+  if (Number.isFinite(n) && n > 0) return toRfc3339(n);
   return '';
+}
+
+function fallbackTime(value: string): string {
+  const clean = value.trim();
+  if (!clean) return toRfc3339(Date.now());
+  const parsed = Date.parse(clean);
+  if (Number.isNaN(parsed)) return clean;
+  return toRfc3339(parsed);
 }
 
 function summarizeToolPart(part: IRPart): string {
@@ -737,6 +765,44 @@ function extractIndexedDbExtra(indexedDb: Record<string, unknown>): Record<strin
     out[k] = v;
   }
   return out;
+}
+
+function extractCherryUnsupported(
+  settings: Record<string, unknown>,
+  persistSlices: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+
+  const settingsUnsupported: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(settings)) {
+    if (key.toLowerCase().includes('memory') && isMeaningfulUnsupported(value)) {
+      settingsUnsupported[key] = cloneJson(value);
+    }
+  }
+  if (Object.keys(settingsUnsupported).length > 0) {
+    out.settings = settingsUnsupported;
+  }
+
+  const persistUnsupported: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(persistSlices)) {
+    if (key.toLowerCase().includes('memory') && isMeaningfulUnsupported(value)) {
+      persistUnsupported[key] = cloneJson(value);
+    }
+  }
+  if (Object.keys(persistUnsupported).length > 0) {
+    out.persistSlices = persistUnsupported;
+  }
+
+  return out;
+}
+
+function isMeaningfulUnsupported(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(asRecord(value)).length > 0;
+  return true;
 }
 
 function redactPersistSlices(slices: Record<string, unknown>): Record<string, unknown> {

@@ -19,13 +19,27 @@ export function guessLogicalType(mime: string, ext: string): string {
   if (m.startsWith('image/') || ['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(e)) return 'image';
   if (m.startsWith('video/') || ['.mp4', '.mov', '.mkv', '.webm'].includes(e)) return 'video';
   if (m.startsWith('audio/') || ['.mp3', '.wav', '.m4a', '.aac', '.ogg'].includes(e)) return 'audio';
-  if (m.startsWith('text/') || ['.txt', '.md', '.csv', '.json'].includes(e)) return 'text';
+  if (m.startsWith('text/') || ['.txt', '.md', '.csv'].includes(e)) return 'text';
   return 'document';
 }
 
 export function ensureOpenAIBaseUrl(url: string): string {
   const clean = url.trim();
-  if (!clean) return clean;
-  if (/\/v\d+\/?$/i.test(clean)) return clean.replace(/\/$/, '');
-  return `${clean.replace(/\/$/, '')}/v1`;
+  if (!clean) return 'https://api.openai.com/v1';
+  try {
+    const parsed = new URL(clean);
+    const path = parsed.pathname.replace(/^\/+|\/+$/g, '');
+    const low = path.toLowerCase();
+    if (!path) {
+      parsed.pathname = '/v1';
+      return parsed.toString().replace(/\/$/, '');
+    }
+    if (low.endsWith('v1') || low.endsWith('v1beta')) {
+      return parsed.toString().replace(/\/$/, '');
+    }
+    parsed.pathname = `/${path}/v1`;
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return clean.replace(/\/$/, '');
+  }
 }

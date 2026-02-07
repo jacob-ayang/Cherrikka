@@ -33,19 +33,23 @@ export function cloneJson<T>(value: T): T {
 }
 
 export function dedupeStrings(items: string[]): string[] {
-  const out: string[] = [];
   const seen = new Set<string>();
   for (const item of items) {
     const clean = item.trim();
-    if (!clean || seen.has(clean)) continue;
+    if (!clean) continue;
     seen.add(clean);
-    out.push(clean);
   }
-  return out;
+  return [...seen].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 export function nowIso(): string {
   return new Date().toISOString();
+}
+
+export function toRfc3339(value: number | string | Date): string {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 export function normalizeText(input: string): string {
