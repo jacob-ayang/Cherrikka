@@ -343,7 +343,15 @@ export async function buildRikkaArchiveFromIR(
     warnings.push(...fileWarnings);
 
     const resolveAssistantId = createAssistantResolver(mappedSettings);
-    const conversationWarnings = writeConversations(db, ir.conversations, filePathById, idMap, resolveAssistantId);
+    const flattenToolCalls = asString(ir.sourceFormat).toLowerCase() === 'cherry';
+    const conversationWarnings = writeConversations(
+      db,
+      ir.conversations,
+      filePathById,
+      idMap,
+      resolveAssistantId,
+      flattenToolCalls,
+    );
     warnings.push(...conversationWarnings);
 
     const dbBytes = db.export();
@@ -559,6 +567,7 @@ function writeConversations(
   filePathById: Record<string, string>,
   idMap: Record<string, string>,
   resolveAssistantId: (candidate: string) => string,
+  flattenToolCalls: boolean,
 ): string[] {
   const warnings: string[] = [];
 
@@ -590,7 +599,7 @@ function writeConversations(
       }
 
       const nodeId = newId();
-      const serializedMessage = rikkaMessageFromIR(message, filePathById);
+      const serializedMessage = rikkaMessageFromIR(message, filePathById, flattenToolCalls);
       db.run(
         'INSERT INTO message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)',
         [nodeId, convId, index, JSON.stringify([serializedMessage]), 0],
@@ -654,10 +663,16 @@ function normalizeConversationTitleText(input: string): string {
   return normalized;
 }
 
-function rikkaMessageFromIR(message: IRMessage, filePathById: Record<string, string>): Record<string, unknown> {
+function rikkaMessageFromIR(
+  message: IRMessage,
+  filePathById: Record<string, string>,
+  flattenToolCalls: boolean,
+): Record<string, unknown> {
   const messageId = ensureUuid(asString(message.id), `message:${pickFirstString(message.id, message.role)}`);
   const toolIdSeen = new Map<string, number>();
-  const parts = message.parts.map((part, index) => rikkaPartFromIR(messageId, index, part, filePathById, toolIdSeen));
+  const parts = message.parts.map(
+    (part, index) => rikkaPartFromIR(messageId, index, part, filePathById, toolIdSeen, flattenToolCalls),
+  );
   if (parts.length === 0) {
     parts.push({
       type: 'me.rerere.ai.ui.UIMessagePart.Text',
@@ -678,6 +693,7 @@ function rikkaPartFromIR(
   part: IRPart,
   filePathById: Record<string, string>,
   toolIdSeen: Map<string, number>,
+  flattenToolCalls: boolean,
 ): Record<string, unknown> {
   switch (part.type) {
     case 'reasoning':
@@ -687,6 +703,12 @@ function rikkaPartFromIR(
       };
     case 'tool':
       {
+      if (flattenToolCalls) {
+        return {
+          type: 'me.rerere.ai.ui.UIMessagePart.Text',
+          text: renderToolPartAsText(part),
+        };
+      }
       const toolCallId = uniqueToolCallId(
         asString(part.toolCallId),
         `tool-call:${messageId}:${pickFirstString(part.name, 'tool')}:${partIndex}`,
@@ -731,6 +753,26 @@ function rikkaPartFromIR(
         text: part.content ?? '',
       };
   }
+}
+
+function renderToolPartAsText(part: IRPart): string {
+  const name = pickFirstString(part.name, 'tool');
+  const lines = [`[Tool Call] ${name}`];
+  const input = pickFirstString(part.input).trim();
+  if (input && input !== '{}') {
+    lines.push(`Input: ${input}`);
+  }
+  const content = pickFirstString(part.content).trim();
+  if (content) {
+    lines.push(`Content: ${content}`);
+  }
+  const output = (part.output ?? [])
+    .map((item) => pickFirstString(item.content).trim())
+    .filter((text) => text.length > 0);
+  if (output.length > 0) {
+    lines.push(`Output: ${output.join('\n')}`);
+  }
+  return lines.join('\n');
 }
 
 function uniqueToolCallId(candidate: string, seed: string, seen: Map<string, number>): string {

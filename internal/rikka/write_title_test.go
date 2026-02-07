@@ -77,7 +77,7 @@ func TestNewAssistantResolver_MapsDeterministicNonUUIDID(t *testing.T) {
 	}
 }
 
-func TestRikkaMessageFromIR_AssignsUniqueToolCallIDsWithinMessage(t *testing.T) {
+func TestRikkaMessageFromIR_FlattensToolPartsToTextForCherrySource(t *testing.T) {
 	msg := ir.IRMessage{
 		ID:   "msg-1",
 		Role: "assistant",
@@ -87,22 +87,24 @@ func TestRikkaMessageFromIR_AssignsUniqueToolCallIDsWithinMessage(t *testing.T) 
 			{Type: "tool", Name: "builtin_web_search", ToolCallID: ""},
 		},
 	}
-	encoded := rikkaMessageFromIR(msg, map[string]string{})
+	encoded := rikkaMessageFromIR(msg, map[string]string{}, true)
 	parts, ok := encoded["parts"].([]any)
 	if !ok || len(parts) != 3 {
-		t.Fatalf("expected 3 tool parts, got=%T len=%d", encoded["parts"], len(parts))
+		t.Fatalf("expected 3 parts, got=%T len=%d", encoded["parts"], len(parts))
 	}
-	seen := map[string]struct{}{}
 	for i, partAny := range parts {
 		part, _ := partAny.(map[string]any)
-		id, _ := part["toolCallId"].(string)
-		if id == "" {
+		typ, _ := part["type"].(string)
+		if typ != "me.rerere.ai.ui.UIMessagePart.Text" {
 			b, _ := json.Marshal(part)
-			t.Fatalf("tool part %d missing toolCallId: %s", i, string(b))
+			t.Fatalf("expected flattened text part, got=%s raw=%s", typ, string(b))
 		}
-		if _, exists := seen[id]; exists {
-			t.Fatalf("duplicated toolCallId in message: %s", id)
+		text, _ := part["text"].(string)
+		if !strings.Contains(text, "builtin_web_search") {
+			t.Fatalf("expected tool name in flattened text, got=%q", text)
 		}
-		seen[id] = struct{}{}
+		if !strings.Contains(text, "[Tool Call]") {
+			t.Fatalf("expected tool marker in flattened text for part %d, got=%q", i, text)
+		}
 	}
 }

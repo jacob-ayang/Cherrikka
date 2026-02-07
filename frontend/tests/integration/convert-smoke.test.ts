@@ -165,7 +165,7 @@ describe('convert smoke', () => {
     }
   });
 
-  it('assigns unique toolCallId values for repeated cherry tool blocks', async () => {
+  it('flattens cherry tool blocks into text parts for rikka output', async () => {
     const srcEntries = new Map<string, Uint8Array>();
     writeJson(srcEntries, 'data.json', {
       version: 5,
@@ -221,11 +221,11 @@ describe('convert smoke', () => {
       expect(assistantRow).toBeTruthy();
       const messages = JSON.parse(assistantRow!) as Array<Record<string, unknown>>;
       const parts = (messages[0]?.parts ?? []) as Array<Record<string, unknown>>;
-      const toolIds = parts
-        .filter((part) => String(part.type) === 'me.rerere.ai.ui.UIMessagePart.Tool')
-        .map((part) => String(part.toolCallId));
-      expect(toolIds.length).toBe(3);
-      expect(new Set(toolIds).size).toBe(3);
+      const toolParts = parts.filter((part) => String(part.type) === 'me.rerere.ai.ui.UIMessagePart.Tool');
+      expect(toolParts.length).toBe(0);
+      const textParts = parts.filter((part) => String(part.type) === 'me.rerere.ai.ui.UIMessagePart.Text');
+      const combined = textParts.map((part) => String(part.text ?? '')).join('\n');
+      expect(combined.includes('[Tool Call] builtin_web_search')).toBe(true);
     } finally {
       db.close();
     }

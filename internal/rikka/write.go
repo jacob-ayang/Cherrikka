@@ -67,7 +67,8 @@ func BuildFromIR(in *ir.BackupIR, outputDir, templateDir string, redactSecrets b
 	}
 	warnings = append(warnings, fileWarnings...)
 	resolveAssistantID := newAssistantResolver(settings)
-	convWarnings, err := writeConversations(db, in.Conversations, filePathByID, idMap, resolveAssistantID)
+	flattenToolCalls := strings.EqualFold(strings.TrimSpace(in.SourceFormat), "cherry")
+	convWarnings, err := writeConversations(db, in.Conversations, filePathByID, idMap, resolveAssistantID, flattenToolCalls)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +196,7 @@ func writeConversations(
 	filePathByID map[string]string,
 	idMap map[string]string,
 	resolveAssistantID func(string) string,
+	flattenToolCalls bool,
 ) ([]string, error) {
 	warnings := []string{}
 	for _, conv := range convs {
@@ -225,7 +227,7 @@ func writeConversations(
 				}
 			}
 			nodeID := util.NewUUID()
-			msg := rikkaMessageFromIR(m, filePathByID)
+			msg := rikkaMessageFromIR(m, filePathByID, flattenToolCalls)
 			msgJSON := util.MustJSON([]any{msg})
 			if _, err := db.Exec(`INSERT INTO message_node (id, conversation_id, node_index, messages, select_index) VALUES (?, ?, ?, ?, ?)`,
 				nodeID,
@@ -302,12 +304,12 @@ func normalizeConversationTitleText(input string) string {
 	return s
 }
 
-func rikkaMessageFromIR(m ir.IRMessage, filePathByID map[string]string) map[string]any {
+func rikkaMessageFromIR(m ir.IRMessage, filePathByID map[string]string, flattenToolCalls bool) map[string]any {
 	messageID := normalizeUUIDOrDeterministic(m.ID, "message:"+m.ID+":"+m.Role)
 	parts := make([]any, 0, len(m.Parts))
 	toolIDSeen := map[string]int{}
 	for idx, p := range m.Parts {
-		parts = append(parts, rikkaPartFromIR(messageID, idx, p, filePathByID, toolIDSeen))
+		parts = append(parts, rikkaPartFromIR(messageID, idx, p, filePathByID, toolIDSeen, flattenToolCalls))
 	}
 	if len(parts) == 0 {
 		parts = append(parts, map[string]any{
@@ -323,7 +325,7 @@ func rikkaMessageFromIR(m ir.IRMessage, filePathByID map[string]string) map[stri
 	}
 }
 
-func rikkaPartFromIR(messageID string, partIndex int, p ir.IRPart, filePathByID map[string]string, toolIDSeen map[string]int) map[string]any {
+func rikkaPartFromIR(messageID string, partIndex int, p ir.IRPart, filePathByID map[string]string, toolIDSeen map[string]int, flattenToolCalls bool) map[string]any {
 	switch p.Type {
 	case "reasoning":
 		return map[string]any{
@@ -331,6 +333,12 @@ func rikkaPartFromIR(messageID string, partIndex int, p ir.IRPart, filePathByID 
 			"reasoning": p.Content,
 		}
 	case "tool":
+		if flattenToolCalls {
+			return map[string]any{
+				"type": "me.rerere.ai.ui.UIMessagePart.Text",
+				"text": renderToolPartAsText(p),
+			}
+		}
 		out := make([]any, 0, len(p.Output))
 		for _, o := range p.Output {
 			out = append(out, map[string]any{
@@ -378,6 +386,30 @@ func rikkaPartFromIR(messageID string, partIndex int, p ir.IRPart, filePathByID 
 			"text": p.Content,
 		}
 	}
+}
+
+func renderToolPartAsText(p ir.IRPart) string {
+	name := fallbackName(strings.TrimSpace(p.Name), "tool")
+	lines := []string{fmt.Sprintf("[Tool Call] %s", name)}
+	input := strings.TrimSpace(p.Input)
+	if input != "" && input != "{}" {
+		lines = append(lines, "Input: "+input)
+	}
+	content := strings.TrimSpace(p.Content)
+	if content != "" {
+		lines = append(lines, "Content: "+content)
+	}
+	outputTexts := make([]string, 0, len(p.Output))
+	for _, out := range p.Output {
+		text := strings.TrimSpace(out.Content)
+		if text != "" {
+			outputTexts = append(outputTexts, text)
+		}
+	}
+	if len(outputTexts) > 0 {
+		lines = append(lines, "Output: "+strings.Join(outputTexts, "\n"))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func uniqueToolCallID(candidate, seed string, seen map[string]int) string {
