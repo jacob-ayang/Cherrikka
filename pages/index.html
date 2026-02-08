@@ -33,20 +33,33 @@
       <section class="panel">
         <h2>快速入口</h2>
         <p>
-          在线版本：
+          在线转换站：
           <a href="https://uwp.de5.net" target="_blank" rel="noreferrer">https://uwp.de5.net</a>
         </p>
         <p>
           仓库地址：
           <a href="https://github.com/jacob-ayang/Cherrikka" target="_blank" rel="noreferrer">jacob-ayang/Cherrikka</a>
         </p>
+        <p>说明：本 GitHub Pages 页面是项目介绍页，完整转换请使用上面的在线转换站。</p>
       </section>
 
       <section class="panel">
-        <h2>上手说明（前端）</h2>
+        <h2>核心能力</h2>
         <ol>
-          <li>上传备份 ZIP。</li>
-          <li>选择源格式（auto/cherry/rikka）。</li>
+          <li>双向转换：Cherry Studio ↔ RikkaHub。</li>
+          <li>多备份整合：一次上传多个 ZIP（可混合 Cherry + Rikka）。</li>
+          <li>冲突策略可选：latest / first / target / source。</li>
+          <li>输出带 sidecar：manifest + 原始 source 包，便于追溯回转。</li>
+        </ol>
+      </section>
+
+      <section class="panel">
+        <h2>上手说明（前端转换站）</h2>
+        <ol>
+          <li>上传一个或多个备份 ZIP。</li>
+          <li>源格式建议选 auto。</li>
+          <li>目标格式按需求选 Cherry 或 Rikka。</li>
+          <li>多输入时可选配置主次策略（默认 latest）。</li>
           <li>点击 Convert，下载转换结果。</li>
         </ol>
       </section>
@@ -70,13 +83,25 @@
       </section>
 
       <section class="panel">
-        <h2>CLI 快速命令</h2>
+        <h2>CLI 示例（多输入整合）</h2>
         <pre><code>go build -o cherrikka ./cmd/cherrikka
 ./cherrikka convert \
-  --input input.zip \
-  --output output.zip \
+  --input cherry.zip \
+  --input rikka.zip \
+  --output merged-rikka.zip \
   --from auto \
-  --to rikka</code></pre>
+  --to rikka \
+  --config-precedence latest</code></pre>
+      </section>
+
+      <section class="panel">
+        <h2>GitHub Pages 启用提示</h2>
+        <ol>
+          <li>进入仓库 Settings → Pages。</li>
+          <li>Build and deployment 的 Source 选择 GitHub Actions。</li>
+          <li>重新运行 Deploy Intro Page to GitHub Pages 工作流。</li>
+        </ol>
+        <p>如果你看到 deploy-pages 的 Not Found / 404，基本都是这里没有启用 Actions Source。</p>
       </section>
     </main>
 
