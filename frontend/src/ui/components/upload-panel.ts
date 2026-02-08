@@ -5,6 +5,7 @@ export interface UploadPanelHandle {
   fileInput: HTMLInputElement;
   dropZone: HTMLElement;
   fileMeta: HTMLElement;
+  fileList: HTMLElement;
 }
 
 export function createUploadPanel(text: I18nText): UploadPanelHandle {
@@ -24,6 +25,7 @@ export function createUploadPanel(text: I18nText): UploadPanelHandle {
 
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
+  fileInput.multiple = true;
   fileInput.accept = '.zip,application/zip';
   fileInput.className = 'file-input';
   fileInput.setAttribute('aria-label', text.sourceFileLabel);
@@ -32,7 +34,10 @@ export function createUploadPanel(text: I18nText): UploadPanelHandle {
   fileMeta.className = 'file-name';
   fileMeta.textContent = text.sourceFileNone;
 
+  const fileList = document.createElement('div');
+  fileList.className = 'file-list';
+
   dropZone.append(fileInput, fileMeta);
-  root.append(title, hint, dropZone);
-  return { root, fileInput, dropZone, fileMeta };
+  root.append(title, hint, dropZone, fileList);
+  return { root, fileInput, dropZone, fileMeta, fileList };
 }

@@ -1,6 +1,7 @@
 export type BackupFormat = 'cherry' | 'rikka';
 export type SourceFormat = 'auto' | BackupFormat;
 export type TargetFormat = BackupFormat;
+export type ConfigPrecedence = 'latest' | 'first' | 'target' | 'source';
 export type DetectResultFormat = BackupFormat | 'unknown';
 export type ProgressLevel = 'info' | 'warning' | 'error';
 
@@ -19,10 +20,22 @@ export interface DetectResult {
 }
 
 export interface ConvertRequest {
-  inputFile: File;
+  inputFile?: File;
+  inputFiles?: File[];
   from: SourceFormat;
   to: TargetFormat;
   redactSecrets: boolean;
+  configPrecedence?: ConfigPrecedence;
+  configSourceIndex?: number;
+}
+
+export interface ManifestSource {
+  index: number;
+  name: string;
+  sourceApp: string;
+  sourceFormat: BackupFormat;
+  sourceSha256: string;
+  hints?: string[];
 }
 
 export interface Manifest {
@@ -35,6 +48,7 @@ export interface Manifest {
   idMap: Record<string, string>;
   redaction: boolean;
   createdAt: string;
+  sources?: ManifestSource[];
   warnings: string[];
 }
 
@@ -54,6 +68,7 @@ export interface BackupIR {
   conversations: IRConversation[];
   files: IRFile[];
   config: Record<string, unknown>;
+  settings?: Record<string, unknown>;
   opaque: Record<string, unknown>;
   warnings: string[];
 }

@@ -87,5 +87,15 @@ type Manifest struct {
 	IDMap         map[string]string `json:"idMap,omitempty"`
 	Redaction     bool              `json:"redaction"`
 	CreatedAt     string            `json:"createdAt"`
+	Sources       []ManifestSource  `json:"sources,omitempty"`
 	Warnings      []string          `json:"warnings,omitempty"`
+}
+
+type ManifestSource struct {
+	Index        int      `json:"index"`
+	Name         string   `json:"name"`
+	SourceApp    string   `json:"sourceApp"`
+	SourceFormat string   `json:"sourceFormat"`
+	SourceSHA256 string   `json:"sourceSha256"`
+	Hints        []string `json:"hints,omitempty"`
 }

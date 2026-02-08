@@ -110,4 +110,32 @@ describe('convert settings parity basics', () => {
     const settings = JSON.parse(new TextDecoder().decode(settingsRaw));
     expect(settings.providers[0].type).toBe('claude');
   });
+
+  it('supports multi-source convert and emits multi-source sidecar', async () => {
+    const cherryInput = await makeCherryZip('openai');
+    const rikkaSeed = await convert({
+      inputFile: cherryInput,
+      from: 'auto',
+      to: 'rikka',
+      redactSecrets: false,
+    });
+    const rikkaInput = new File([rikkaSeed.outputBlob], 'fixture-rikka.zip', { type: 'application/zip' });
+
+    const merged = await convert({
+      inputFiles: [cherryInput, rikkaInput],
+      from: 'auto',
+      to: 'rikka',
+      redactSecrets: false,
+      configPrecedence: 'latest',
+    });
+    const entries = await readZipBlob(merged.outputBlob);
+    expect(entries.has('cherrikka/raw/source-1.zip')).toBe(true);
+    expect(entries.has('cherrikka/raw/source-2.zip')).toBe(true);
+
+    const manifestRaw = entries.get('cherrikka/manifest.json');
+    expect(manifestRaw).toBeTruthy();
+    const manifest = JSON.parse(new TextDecoder().decode(manifestRaw));
+    expect(Array.isArray(manifest.sources)).toBe(true);
+    expect(manifest.sources.length).toBe(2);
+  });
 });

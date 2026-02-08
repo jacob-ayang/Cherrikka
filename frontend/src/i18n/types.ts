@@ -14,6 +14,8 @@ export interface I18nText {
   sourceDropHint: string;
   sourceFileNone: string;
   sourceFileSelected: string;
+  sourceFileRemove: string;
+  sourceFilesCount: string;
   sourceFormat: string;
   sourceFormatAuto: string;
   sourceFormatCherry: string;
@@ -22,6 +24,12 @@ export interface I18nText {
   targetPending: string;
   targetCherry: string;
   targetRikka: string;
+  configPrecedence: string;
+  configPrecedenceLatest: string;
+  configPrecedenceFirst: string;
+  configPrecedenceTarget: string;
+  configPrecedenceSource: string;
+  configSourceIndex: string;
   redactSecrets: string;
   convert: string;
   converting: string;
@@ -40,6 +48,7 @@ export interface I18nText {
   convertWarnings: string;
   convertErrors: string;
   noSourceFile: string;
+  multiSourceAutoOnly: string;
   unresolvedTarget: string;
   detectFailed: string;
   language: string;

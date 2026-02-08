@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"cherrikka/internal/app"
 	"cherrikka/internal/web"
@@ -62,25 +63,31 @@ func runValidate(args []string) {
 
 func runConvert(args []string) {
 	fs := flag.NewFlagSet("convert", flag.ExitOnError)
-	input := fs.String("input", "", "input backup zip")
+	var inputs multiStringFlag
+	fs.Var(&inputs, "input", "input backup zip (repeatable)")
 	output := fs.String("output", "", "output backup zip")
 	from := fs.String("from", "auto", "source format: auto|cherry|rikka")
 	to := fs.String("to", "", "target format: cherry|rikka")
 	template := fs.String("template", "", "target template backup zip")
 	redact := fs.Bool("redact-secrets", false, "redact secret fields")
+	configPrecedence := fs.String("config-precedence", "latest", "config precedence for multi-input merge: latest|first|target|source")
+	configSourceIndex := fs.Int("config-source-index", 0, "1-based source index when --config-precedence=source")
 	_ = fs.Parse(args)
 
-	if *input == "" || *output == "" || *to == "" {
+	if len(inputs) == 0 || *output == "" || *to == "" {
 		die("--input, --output, --to are required")
 	}
 
 	manifest, err := app.Convert(app.ConvertOptions{
-		InputPath:     *input,
-		OutputPath:    *output,
-		From:          *from,
-		To:            *to,
-		TemplatePath:  *template,
-		RedactSecrets: *redact,
+		InputPath:         inputs[0],
+		InputPaths:        []string(inputs),
+		OutputPath:        *output,
+		From:              *from,
+		To:                *to,
+		TemplatePath:      *template,
+		RedactSecrets:     *redact,
+		ConfigPrecedence:  *configPrecedence,
+		ConfigSourceIndex: *configSourceIndex,
 	})
 	if err != nil {
 		die(err.Error())
@@ -116,6 +123,24 @@ func printUsage() {
 
   cherrikka inspect --input <backup.zip>
   cherrikka validate --input <backup.zip>
-  cherrikka convert --input <src.zip> --output <dst.zip> --from auto|cherry|rikka --to cherry|rikka [--template <target-template.zip>] [--redact-secrets]
+  cherrikka convert --input <src.zip> [--input <src2.zip> ...] --output <dst.zip> --from auto|cherry|rikka --to cherry|rikka [--template <target-template.zip>] [--redact-secrets] [--config-precedence latest|first|target|source] [--config-source-index <n>]
   cherrikka serve --listen 127.0.0.1:7788`)
+}
+
+type multiStringFlag []string
+
+func (m *multiStringFlag) String() string {
+	if m == nil {
+		return ""
+	}
+	return strings.Join(*m, ",")
+}
+
+func (m *multiStringFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	*m = append(*m, value)
+	return nil
 }

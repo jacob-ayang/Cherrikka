@@ -55,12 +55,15 @@ type ValidateResult struct {
 }
 
 type ConvertOptions struct {
-	InputPath     string
-	OutputPath    string
-	From          string // auto|cherry|rikka
-	To            string // cherry|rikka
-	TemplatePath  string
-	RedactSecrets bool
+	InputPath         string
+	InputPaths        []string
+	OutputPath        string
+	From              string // auto|cherry|rikka
+	To                string // cherry|rikka
+	TemplatePath      string
+	RedactSecrets     bool
+	ConfigPrecedence  string // latest|first|target|source
+	ConfigSourceIndex int    // 1-based, used when ConfigPrecedence=source
 }
 
 func Inspect(path string) (*InspectResult, error) {
@@ -150,50 +153,89 @@ func Validate(path string) (*ValidateResult, error) {
 }
 
 func Convert(opts ConvertOptions) (*ir.Manifest, error) {
-	if opts.InputPath == "" || opts.OutputPath == "" {
+	inputPaths := normalizeInputPaths(opts.InputPath, opts.InputPaths)
+	if len(inputPaths) == 0 || strings.TrimSpace(opts.OutputPath) == "" {
 		return nil, fmt.Errorf("input and output are required")
 	}
 	to := strings.ToLower(strings.TrimSpace(opts.To))
 	if to != "cherry" && to != "rikka" {
 		return nil, fmt.Errorf("--to must be cherry or rikka")
 	}
-
-	inDir, cleanupIn, err := extractToTemp(opts.InputPath)
-	if err != nil {
-		return nil, err
-	}
-	defer cleanupIn()
-
-	d := backup.DetectExtractedDir(inDir)
-	if d.Format == backup.FormatUnknown {
-		return nil, fmt.Errorf("cannot detect backup format")
-	}
 	from := strings.ToLower(strings.TrimSpace(opts.From))
 	if from == "" {
 		from = "auto"
 	}
-	if from != "auto" && from != string(d.Format) {
-		return nil, fmt.Errorf("source format mismatch: detected=%s flag=%s", d.Format, from)
+	if len(inputPaths) > 1 && from != "auto" {
+		return nil, fmt.Errorf("multi-input convert only supports --from auto")
 	}
 
-	sourceIR, err := parseByFormat(d.Format, inDir)
+	parsedSources := make([]parsedSource, 0, len(inputPaths))
+	cleanupInputs := make([]func(), 0, len(inputPaths))
+	defer func() {
+		for _, cleanup := range cleanupInputs {
+			cleanup()
+		}
+	}()
+	for i, inputPath := range inputPaths {
+		inDir, cleanupIn, err := extractToTemp(inputPath)
+		if err != nil {
+			return nil, err
+		}
+		cleanupInputs = append(cleanupInputs, cleanupIn)
+
+		d := backup.DetectExtractedDir(inDir)
+		if d.Format == backup.FormatUnknown {
+			return nil, fmt.Errorf("cannot detect backup format: %s", filepath.Base(inputPath))
+		}
+		if from != "auto" && from != string(d.Format) {
+			return nil, fmt.Errorf("source format mismatch: detected=%s flag=%s (%s)", d.Format, from, filepath.Base(inputPath))
+		}
+
+		sourceIR, parseErr := parseByFormat(d.Format, inDir)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		rehydrateWarnings, rehydrateErr := tryRehydrateFromSidecar(inDir, to, sourceIR)
+		if rehydrateErr != nil {
+			return nil, rehydrateErr
+		}
+		sourceIR.Warnings = append(sourceIR.Warnings, rehydrateWarnings...)
+		sourceIR.Warnings = append(sourceIR.Warnings, mapping.EnsureNormalizedSettings(sourceIR)...)
+		sourceIR.TargetFormat = to
+		sourceIR.DetectedHints = d.Hints
+
+		sourceBytes, readErr := os.ReadFile(inputPath)
+		if readErr != nil {
+			return nil, readErr
+		}
+		parsedSources = append(parsedSources, parsedSource{
+			Index:       i + 1,
+			Tag:         fmt.Sprintf("S%d", i+1),
+			Path:        inputPath,
+			Name:        filepath.Base(inputPath),
+			Format:      string(d.Format),
+			Hints:       d.Hints,
+			SHA256:      util.SHA256Hex(sourceBytes),
+			LatestUnix:  inferLatestUnixMillis(inputPath, sourceIR),
+			SourceBytes: sourceBytes,
+			IR:          sourceIR,
+		})
+	}
+
+	mergedIR, mergeReport, err := mergeSources(parsedSources, MergeOptions{
+		TargetFormat:      to,
+		ConfigPrecedence:  opts.ConfigPrecedence,
+		ConfigSourceIndex: opts.ConfigSourceIndex,
+	})
 	if err != nil {
 		return nil, err
 	}
-	rehydrateWarnings, err := tryRehydrateFromSidecar(inDir, to, sourceIR)
-	if err != nil {
-		return nil, err
-	}
-	sourceIR.Warnings = append(sourceIR.Warnings, rehydrateWarnings...)
-	sourceIR.Warnings = append(sourceIR.Warnings, mapping.EnsureNormalizedSettings(sourceIR)...)
-	sourceIR.TargetFormat = to
-	sourceIR.DetectedHints = d.Hints
 
 	if opts.RedactSecrets {
-		sourceIR.Config = util.RedactAny(sourceIR.Config).(map[string]any)
-		if len(sourceIR.Settings) > 0 {
-			if redacted, ok := util.RedactAny(sourceIR.Settings).(map[string]any); ok {
-				sourceIR.Settings = redacted
+		mergedIR.Config = util.RedactAny(mergedIR.Config).(map[string]any)
+		if len(mergedIR.Settings) > 0 {
+			if redacted, ok := util.RedactAny(mergedIR.Settings).(map[string]any); ok {
+				mergedIR.Settings = redacted
 			}
 		}
 	}
@@ -217,35 +259,57 @@ func Convert(opts ConvertOptions) (*ir.Manifest, error) {
 	idMap := map[string]string{}
 	buildWarnings := []string{}
 	if to == "cherry" {
-		buildWarnings, err = cherry.BuildFromIR(sourceIR, buildDir, templateDir, opts.RedactSecrets, idMap)
+		buildWarnings, err = cherry.BuildFromIR(mergedIR, buildDir, templateDir, opts.RedactSecrets, idMap)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		buildWarnings, err = rikka.BuildFromIR(sourceIR, buildDir, templateDir, opts.RedactSecrets, idMap)
+		buildWarnings, err = rikka.BuildFromIR(mergedIR, buildDir, templateDir, opts.RedactSecrets, idMap)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	sourceBytes, err := os.ReadFile(opts.InputPath)
-	if err != nil {
-		return nil, err
+	primaryIdx := 0
+	if mergeReport != nil && mergeReport.PrimarySourceIndex > 0 {
+		primaryIdx = mergeReport.PrimarySourceIndex - 1
 	}
+	if primaryIdx < 0 || primaryIdx >= len(parsedSources) {
+		primaryIdx = 0
+	}
+	primarySource := parsedSources[primaryIdx]
+
+	manifestSources := make([]ir.ManifestSource, 0, len(parsedSources))
+	for _, src := range parsedSources {
+		manifestSources = append(manifestSources, ir.ManifestSource{
+			Index:        src.Index,
+			Name:         src.Name,
+			SourceApp:    src.IR.SourceApp,
+			SourceFormat: src.Format,
+			SourceSHA256: src.SHA256,
+			Hints:        cloneStringSlice(src.Hints),
+		})
+	}
+	allWarnings := append([]string{}, mergedIR.Warnings...)
+	if mergeReport != nil {
+		allWarnings = append(allWarnings, mergeReport.Warnings...)
+	}
+	allWarnings = append(allWarnings, buildWarnings...)
 	manifest := &ir.Manifest{
 		SchemaVersion: 1,
-		SourceApp:     sourceIR.SourceApp,
-		SourceFormat:  string(d.Format),
-		SourceSHA256:  util.SHA256Hex(sourceBytes),
+		SourceApp:     primarySource.IR.SourceApp,
+		SourceFormat:  primarySource.Format,
+		SourceSHA256:  primarySource.SHA256,
 		TargetApp:     targetAppName(to),
 		TargetFormat:  to,
 		IDMap:         idMap,
 		Redaction:     opts.RedactSecrets,
 		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
-		Warnings:      dedupeStrings(append(append([]string{}, sourceIR.Warnings...), buildWarnings...)),
+		Sources:       manifestSources,
+		Warnings:      dedupeStrings(allWarnings),
 	}
 
-	if err := writeSidecar(buildDir, sourceBytes, manifest); err != nil {
+	if err := writeSidecar(buildDir, parsedSources, primaryIdx, manifest); err != nil {
 		return nil, err
 	}
 
@@ -259,13 +323,29 @@ func Convert(opts ConvertOptions) (*ir.Manifest, error) {
 	return manifest, nil
 }
 
+func normalizeInputPaths(single string, multi []string) []string {
+	out := []string{}
+	push := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		out = append(out, v)
+	}
+	if len(multi) > 0 {
+		for _, item := range multi {
+			push(item)
+		}
+	}
+	if len(out) == 0 {
+		push(single)
+	}
+	return out
+}
+
 func tryRehydrateFromSidecar(inputDir, targetFormat string, sourceIR *ir.BackupIR) ([]string, error) {
 	manifestPath := filepath.Join(inputDir, "cherrikka", "manifest.json")
-	sourceZipPath := filepath.Join(inputDir, "cherrikka", "raw", "source.zip")
 	if _, err := os.Stat(manifestPath); err != nil {
-		return nil, nil
-	}
-	if _, err := os.Stat(sourceZipPath); err != nil {
 		return nil, nil
 	}
 
@@ -277,27 +357,64 @@ func tryRehydrateFromSidecar(inputDir, targetFormat string, sourceIR *ir.BackupI
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		return []string{"sidecar-rehydrate:invalid-manifest"}, nil
 	}
-	if !strings.EqualFold(strings.TrimSpace(manifest.SourceFormat), strings.TrimSpace(targetFormat)) {
+	targetFormat = strings.ToLower(strings.TrimSpace(targetFormat))
+	type candidate struct {
+		path   string
+		format string
+		index  int
+	}
+	candidates := []candidate{}
+	if strings.EqualFold(strings.TrimSpace(manifest.SourceFormat), targetFormat) {
+		sourceZipPath := filepath.Join(inputDir, "cherrikka", "raw", "source.zip")
+		if _, err := os.Stat(sourceZipPath); err == nil {
+			candidates = append(candidates, candidate{
+				path:   sourceZipPath,
+				format: strings.ToLower(strings.TrimSpace(manifest.SourceFormat)),
+				index:  0,
+			})
+		}
+	}
+	for _, src := range manifest.Sources {
+		if !strings.EqualFold(strings.TrimSpace(src.SourceFormat), targetFormat) {
+			continue
+		}
+		p := filepath.Join(inputDir, "cherrikka", "raw", fmt.Sprintf("source-%d.zip", src.Index))
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			path:   p,
+			format: strings.ToLower(strings.TrimSpace(src.SourceFormat)),
+			index:  src.Index,
+		})
+	}
+	if len(candidates) == 0 {
 		return nil, nil
 	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].index < candidates[j].index })
+	chosen := candidates[0]
+	outWarnings := []string{}
+	if len(candidates) > 1 {
+		outWarnings = append(outWarnings, "sidecar-rehydrate:multiple-source-candidates")
+	}
 
-	sidecarDir, cleanup, err := extractToTemp(sourceZipPath)
+	sidecarDir, cleanup, err := extractToTemp(chosen.path)
 	if err != nil {
-		return []string{"sidecar-rehydrate:extract-source-failed"}, nil
+		return append(outWarnings, "sidecar-rehydrate:extract-source-failed"), nil
 	}
 	defer cleanup()
 
 	d := backup.DetectExtractedDir(sidecarDir)
 	if d.Format == backup.FormatUnknown {
-		return []string{"sidecar-rehydrate:source-format-unknown"}, nil
+		return append(outWarnings, "sidecar-rehydrate:source-format-unknown"), nil
 	}
 	if !strings.EqualFold(string(d.Format), targetFormat) {
-		return []string{"sidecar-rehydrate:source-format-mismatch"}, nil
+		return append(outWarnings, "sidecar-rehydrate:source-format-mismatch"), nil
 	}
 
 	rawIR, err := parseByFormat(d.Format, sidecarDir)
 	if err != nil {
-		return []string{"sidecar-rehydrate:parse-source-failed"}, nil
+		return append(outWarnings, "sidecar-rehydrate:parse-source-failed"), nil
 	}
 
 	switch strings.ToLower(strings.TrimSpace(targetFormat)) {
@@ -328,11 +445,12 @@ func tryRehydrateFromSidecar(inputDir, targetFormat string, sourceIR *ir.BackupI
 	}
 	sourceIR.Opaque["interop.sidecar"] = map[string]any{
 		"rehydrated":   true,
-		"sourceFormat": strings.ToLower(strings.TrimSpace(manifest.SourceFormat)),
+		"sourceFormat": chosen.format,
 		"targetFormat": strings.ToLower(strings.TrimSpace(targetFormat)),
 		"depth":        1,
 	}
-	return []string{"sidecar-rehydrate:applied"}, nil
+	outWarnings = append(outWarnings, "sidecar-rehydrate:applied")
+	return outWarnings, nil
 }
 
 func mapAny(v any) map[string]any {
@@ -367,7 +485,13 @@ func extractToTemp(zipPath string) (string, func(), error) {
 	return tmp, cleanup, nil
 }
 
-func writeSidecar(buildDir string, sourceZip []byte, manifest *ir.Manifest) error {
+func writeSidecar(buildDir string, sources []parsedSource, primaryIdx int, manifest *ir.Manifest) error {
+	if len(sources) == 0 {
+		return fmt.Errorf("write sidecar: empty source list")
+	}
+	if primaryIdx < 0 || primaryIdx >= len(sources) {
+		primaryIdx = 0
+	}
 	sidecarDir := filepath.Join(buildDir, "cherrikka")
 	if err := util.EnsureDir(filepath.Join(sidecarDir, "raw")); err != nil {
 		return err
@@ -379,8 +503,14 @@ func writeSidecar(buildDir string, sourceZip []byte, manifest *ir.Manifest) erro
 	if err := os.WriteFile(filepath.Join(sidecarDir, "manifest.json"), mb, 0o644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(sidecarDir, "raw", "source.zip"), sourceZip, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sidecarDir, "raw", "source.zip"), sources[primaryIdx].SourceBytes, 0o644); err != nil {
 		return err
+	}
+	for _, src := range sources {
+		path := filepath.Join(sidecarDir, "raw", fmt.Sprintf("source-%d.zip", src.Index))
+		if err := os.WriteFile(path, src.SourceBytes, 0o644); err != nil {
+			return err
+		}
 	}
 	return nil
 }

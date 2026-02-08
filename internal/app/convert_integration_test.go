@@ -85,6 +85,41 @@ func TestConvertCherryToRikkaAndBack(t *testing.T) {
 	}
 }
 
+func TestConvertMultiSourceMergeToRikka(t *testing.T) {
+	srcCherryZip := buildSampleCherryBackup(t)
+	srcRikkaZip := buildSampleRikkaBackup(t)
+
+	outRikka := filepath.Join(t.TempDir(), "merged_to_rikka.zip")
+	manifest, err := Convert(ConvertOptions{
+		InputPaths: []string{srcCherryZip, srcRikkaZip},
+		OutputPath: outRikka,
+		From:       "auto",
+		To:         "rikka",
+	})
+	if err != nil {
+		t.Fatalf("convert multi-source failed: %v", err)
+	}
+	if len(manifest.Sources) != 2 {
+		t.Fatalf("expected 2 manifest sources, got %d", len(manifest.Sources))
+	}
+	assertZipHasEntries(t, outRikka, "cherrikka/raw/source.zip", "cherrikka/raw/source-1.zip", "cherrikka/raw/source-2.zip")
+
+	val, err := Validate(outRikka)
+	if err != nil {
+		t.Fatalf("validate merged output failed: %v", err)
+	}
+	if !val.Valid {
+		t.Fatalf("expected merged output valid, issues=%v", val.Issues)
+	}
+	ins, err := Inspect(outRikka)
+	if err != nil {
+		t.Fatalf("inspect merged output failed: %v", err)
+	}
+	if ins.Conversations < 2 {
+		t.Fatalf("expected merged conversations >=2, got %d", ins.Conversations)
+	}
+}
+
 func TestConvertWithRedaction(t *testing.T) {
 	srcRikka := buildSampleRikkaBackup(t)
 	outRikka := filepath.Join(t.TempDir(), "redacted_rikka.zip")
