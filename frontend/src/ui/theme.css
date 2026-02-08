@@ -1,4 +1,5 @@
 :root {
+  --font-pixel: "Silkscreen", "Courier New", "Consolas", monospace;
   --bg-0: #07080a;
   --bg-1: #0e1116;
   --bg-2: #141921;
@@ -17,7 +18,7 @@
   --progress-b: #d5dbe6;
   --noise: #ffffff07;
   --theme-shadow: #00000070;
-  --input-height: 24px;
+  --input-height: 30px;
 }
 
 body[data-theme='dark'] {
@@ -61,16 +62,17 @@ body,
     radial-gradient(circle at 88% 92%, #ffffff14 0%, transparent 28%),
     linear-gradient(150deg, var(--bg-0) 0%, var(--bg-1) 48%, var(--bg-2) 100%);
   color: var(--text-0);
-  font-family: "Courier New", "Consolas", monospace;
+  font-family: var(--font-pixel);
+  letter-spacing: 0.015em;
 }
 
 .shell {
-  width: min(880px, 100%);
+  width: min(1120px, 100%);
   margin: 0 auto;
-  padding: 8px;
+  padding: 14px;
   display: grid;
-  gap: 4px;
-  min-height: 100vh;
+  gap: 10px;
+  min-height: 0;
 }
 
 .shell::after {
@@ -88,27 +90,27 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 4px;
+  gap: 8px;
   border: 1px solid var(--line-strong);
   background:
     linear-gradient(180deg, #ffffff11 0%, #00000000 42%),
     linear-gradient(180deg, var(--surface) 0%, var(--surface-soft) 100%);
-  padding: 3px 6px;
+  padding: 8px 10px;
   box-shadow: inset 0 1px 0 #ffffff14;
-  height: 22px;
+  min-height: 54px;
 }
 
 .app-brand {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 10px;
   min-width: 0;
   flex: 1;
 }
 
 .app-icon {
-  width: 18px;
-  height: 18px;
+  width: 28px;
+  height: 28px;
   border: 1px solid var(--line-strong);
   background: var(--bg-0);
   image-rendering: pixelated;
@@ -118,7 +120,7 @@ body,
 
 .title {
   margin: 0;
-  font-size: 12px;
+  font-size: 16px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   white-space: nowrap;
@@ -129,24 +131,24 @@ body,
 }
 
 .subtitle {
-  margin: 2px 0 0;
+  margin: 4px 0 0;
   color: var(--text-2);
-  font-size: 8px;
+  font-size: 11px;
   line-height: 1.3;
-  display: none;
+  display: block;
 }
 
 .top-controls {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   flex-wrap: nowrap;
   justify-content: flex-end;
   flex: 0 1 auto;
 }
 
 .control-label {
-  font-size: 8px;
+  font-size: 11px;
   color: var(--text-2);
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -157,7 +159,7 @@ body,
   display: inline-flex;
   border: 1px solid var(--line);
   background: var(--input-bg);
-  height: 20px;
+  height: 30px;
 }
 
 .theme-btn {
@@ -166,8 +168,8 @@ body,
   background: transparent;
   color: var(--text-2);
   font: inherit;
-  font-size: 8px;
-  padding: 2px 4px;
+  font-size: 11px;
+  padding: 4px 8px;
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease;
   display: flex;
@@ -188,10 +190,10 @@ body,
   background: linear-gradient(180deg, #ffffff1b, #00000000), var(--surface-raised);
   color: var(--text-0);
   font: inherit;
-  font-size: 8px;
-  padding: 2px 4px;
+  font-size: 11px;
+  padding: 4px 8px;
   cursor: pointer;
-  height: 20px;
+  height: 30px;
   display: flex;
   align-items: center;
   white-space: nowrap;
@@ -206,7 +208,7 @@ body,
     'source direction'
     'options progress'
     'result result';
-  gap: 6px;
+  gap: 10px;
 }
 
 .panel {
@@ -215,7 +217,7 @@ body,
   background:
     linear-gradient(180deg, #ffffff0c 0%, #00000000 42%),
     linear-gradient(180deg, var(--surface) 0%, var(--surface-soft) 100%);
-  padding: 7px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
   box-shadow: inset 0 1px 0 #ffffff12;
@@ -233,32 +235,32 @@ body,
 
 .panel-source {
   grid-area: source;
-  min-height: 78px;
+  min-height: 0;
 }
 
 .panel-direction {
   grid-area: direction;
-  min-height: 78px;
+  min-height: 0;
 }
 
 .panel-options {
   grid-area: options;
-  min-height: 62px;
+  min-height: 0;
 }
 
 .panel-progress {
   grid-area: progress;
-  min-height: 62px;
+  min-height: 0;
 }
 
 .panel-result {
   grid-area: result;
-  min-height: 150px;
+  min-height: 170px;
 }
 
 .panel-title {
   margin: 0 0 5px;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-1);
   letter-spacing: 0.09em;
   text-transform: uppercase;
@@ -268,7 +270,7 @@ body,
 .panel-hint {
   margin: 0 0 5px;
   color: var(--text-2);
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.4;
   flex: 0 0 auto;
 }
@@ -280,8 +282,8 @@ body,
   background: var(--input-bg);
   color: var(--text-0);
   font: inherit;
-  font-size: 9px;
-  padding: 4px 6px;
+  font-size: 11px;
+  padding: 5px 8px;
   height: var(--input-height);
   display: flex;
   align-items: center;
@@ -292,8 +294,8 @@ body,
   background: linear-gradient(180deg, #ffffff20, #00000000), var(--surface-raised);
   color: var(--text-0);
   font: inherit;
-  font-size: 8px;
-  padding: 2px 5px;
+  font-size: 11px;
+  padding: 4px 8px;
   margin-right: 5px;
   cursor: pointer;
 }
@@ -305,7 +307,7 @@ body,
   padding: 5px;
   background: linear-gradient(180deg, #ffffff09, #00000000), var(--input-bg);
   flex: 1;
-  min-height: 40px;
+  min-height: 58px;
   place-items: center;
 }
 
@@ -317,7 +319,7 @@ body,
 .file-name {
   margin: 0;
   color: var(--text-1);
-  font-size: 8px;
+  font-size: 10px;
   word-break: break-all;
   line-height: 1.3;
 }
@@ -326,7 +328,7 @@ body,
   margin-top: 4px;
   display: grid;
   gap: 4px;
-  max-height: 128px;
+  max-height: 180px;
   overflow: auto;
   border: 1px solid var(--line-soft);
   background: var(--input-bg);
@@ -341,14 +343,14 @@ body,
 }
 
 .file-row-info {
-  font-size: 8px;
+  font-size: 10px;
   color: var(--text-1);
   word-break: break-word;
   line-height: 1.4;
 }
 
 .file-row-meta {
-  font-size: 8px;
+  font-size: 10px;
   color: var(--text-2);
   border-top: 1px dashed var(--line-soft);
   padding-top: 3px;
@@ -357,21 +359,21 @@ body,
 }
 
 .btn-remove {
-  min-width: 56px;
+  min-width: 74px;
   padding: 0 6px;
 }
 
 .format-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  gap: 8px;
   flex: 1;
 }
 
 .action-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  gap: 8px;
   flex: 1;
 }
 
@@ -379,7 +381,7 @@ body,
   display: flex;
   flex-direction: column;
   gap: 3px;
-  font-size: 8px;
+  font-size: 10px;
   color: var(--text-1);
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -390,7 +392,7 @@ body,
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 9px;
+  font-size: 11px;
   color: var(--text-1);
   padding: 0;
   height: var(--input-height);
@@ -402,7 +404,7 @@ body,
   background: linear-gradient(180deg, #ffffff22, #00000000), var(--surface-raised);
   color: var(--text-0);
   font: inherit;
-  font-size: 9px;
+  font-size: 11px;
   padding: 0 7px;
   cursor: pointer;
   text-decoration: none;
@@ -428,7 +430,7 @@ body,
 }
 
 .status {
-  font-size: 8px;
+  font-size: 10px;
   color: var(--text-1);
   margin: 0 0 4px;
   letter-spacing: 0.04em;
@@ -438,7 +440,7 @@ body,
 .progress-bar {
   border: 1px solid var(--line);
   background: var(--input-bg);
-  height: 9px;
+  height: 12px;
   overflow: hidden;
   flex: 0 0 auto;
   margin: 2px 0;
@@ -453,10 +455,10 @@ body,
 
 .log {
   margin: 2px 0 0;
-  font-size: 8px;
+  font-size: 10px;
   color: var(--text-2);
-  min-height: 32px;
-  max-height: 90px;
+  min-height: 64px;
+  max-height: 140px;
   border: 1px solid var(--line-soft);
   background: var(--input-bg);
   padding: 5px;
@@ -478,18 +480,18 @@ body,
 
 .json {
   margin: 0;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.4;
   border: 1px solid var(--line);
   background: var(--input-bg);
   padding: 5px;
-  max-height: 180px;
+  max-height: 260px;
   overflow: auto;
   flex: 1;
 }
 
 .result-list {
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.4;
   color: var(--text-1);
   margin: 0 0 3px;
@@ -498,6 +500,12 @@ body,
 }
 
 @media (max-width: 980px) {
+  .shell {
+    width: min(100%, 960px);
+    padding: 10px;
+    gap: 8px;
+  }
+
   .grid {
     grid-template-columns: 1fr;
     grid-template-areas:
@@ -506,20 +514,21 @@ body,
       'options'
       'progress'
       'result';
+    gap: 8px;
   }
 }
 
 @media (max-width: 760px) {
   .shell {
     padding: 8px;
-    gap: 8px;
+    gap: 6px;
   }
 
   .topbar {
-    height: auto;
+    min-height: 0;
     flex-direction: column;
     align-items: flex-start;
-    padding: 6px 8px;
+    padding: 8px;
   }
 
   .app-brand {
@@ -533,7 +542,7 @@ body,
   .top-controls {
     width: 100%;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 6px;
   }
 
   .format-row,
@@ -546,7 +555,6 @@ body,
   .panel-direction,
   .panel-options,
   .panel-progress {
-    min-height: auto;
-    min-height: 65px;
+    min-height: 0;
   }
 }
